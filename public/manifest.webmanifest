@@ -1,0 +1,18 @@
+{
+  "name": "Sunnyside Life Sim",
+  "short_name": "Sunnyside",
+  "description": "Cozy 3D Sims-style life simulation game designed for mobile landscape touchscreens.",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#dceff7",
+  "theme_color": "#1e8e6e",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
