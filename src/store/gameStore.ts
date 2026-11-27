@@ -28,10 +28,12 @@ import type {
   FloatingFeedback,
   GameClock,
   GameMode,
+  GraphicsQuality,
   NeedKey,
   PieMenuTarget,
   PlacedObject,
   RotationDeg,
+  SimAppearance,
   SimSpeed,
   SimState,
   TileCoord,
@@ -51,6 +53,8 @@ function nextId(prefix: string): string {
 export interface GameStoreState {
   mode: GameMode;
   wallMode: WallViewMode;
+  graphicsQuality: GraphicsQuality;
+  wardrobeOpen: boolean;
   speed: SimSpeed;
   lastLiveSpeed: Exclude<SimSpeed, 0>;
   freeWill: boolean;
@@ -68,6 +72,7 @@ export interface GameStoreState {
   // Mode & HUD actions
   setMode: (mode: GameMode) => void;
   cycleWallMode: () => void;
+  setGraphicsQuality: (quality: GraphicsQuality) => void;
   setSpeed: (speed: SimSpeed) => void;
   toggleFreeWill: () => void;
   openPieMenu: (target: PieMenuTarget) => void;
@@ -75,6 +80,11 @@ export interface GameStoreState {
   addFeedback: (text: string, tone?: FloatingFeedback['tone']) => void;
   pruneFeedbacks: () => void;
   focusCameraOnSim: () => void;
+
+  // In-world Wardrobe actions (triggered via dresser/mirror)
+  openWardrobe: () => void;
+  closeWardrobe: (showSavedToast?: boolean) => void;
+  updateSimAppearance: (patch: Partial<SimAppearance>) => void;
 
   // Live mode gameplay actions
   enqueueWalk: (tile: TileCoord) => boolean;
@@ -200,6 +210,8 @@ export const useGameStore = create<GameStoreState>()(
     (set, get) => ({
       mode: 'live',
       wallMode: 'cutaway',
+      graphicsQuality: 'high',
+      wardrobeOpen: false,
       speed: 1,
       lastLiveSpeed: 1,
       freeWill: true,
@@ -220,6 +232,7 @@ export const useGameStore = create<GameStoreState>()(
         if (mode === 'build') {
           set({
             mode: 'build',
+            wardrobeOpen: false,
             lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
             speed: 0,
             pieMenu: null,
@@ -244,7 +257,7 @@ export const useGameStore = create<GameStoreState>()(
             pieMenu: null,
             actionQueue: refreshedQueue,
             sim: frontWasCancelled
-              ? { ...state.sim, pose: 'idle', activeObjectId: null }
+              ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
               : state.sim,
           });
         }
@@ -256,6 +269,65 @@ export const useGameStore = create<GameStoreState>()(
           const next = order[(order.indexOf(state.wallMode) + 1) % order.length];
           return { wallMode: next };
         }),
+
+      setGraphicsQuality: (graphicsQuality) =>
+        set((state) => ({
+          graphicsQuality,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text:
+                graphicsQuality === 'high'
+                  ? 'Graphics: High Fidelity'
+                  : 'Graphics: Balanced Mobile',
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        })),
+
+      openWardrobe: () =>
+        set((state) => ({
+          wardrobeOpen: true,
+          pieMenu: null,
+          lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
+          speed: 0,
+          sim: {
+            ...state.sim,
+            pose: 'idle',
+            activeObjectId: null,
+            activeProp: null,
+          },
+        })),
+
+      closeWardrobe: (showSavedToast = true) =>
+        set((state) => ({
+          wardrobeOpen: false,
+          speed: state.lastLiveSpeed || 1,
+          feedbacks: showSavedToast
+            ? [
+                ...state.feedbacks.slice(-3),
+                {
+                  id: nextId('fb'),
+                  text: 'Style Updated!',
+                  tone: 'positive',
+                  createdAt: Date.now(),
+                },
+              ]
+            : state.feedbacks,
+        })),
+
+      updateSimAppearance: (patch) =>
+        set((state) => ({
+          sim: {
+            ...state.sim,
+            appearance: {
+              ...state.sim.appearance,
+              ...patch,
+            },
+          },
+        })),
 
       setSpeed: (speed) =>
         set((state) => ({
@@ -406,6 +478,8 @@ export const useGameStore = create<GameStoreState>()(
           needDeltas: interaction.needDeltas,
           animationPose: interaction.animationPose,
           emotionBoost: interaction.emotionBoost,
+          opensWardrobe: interaction.opensWardrobe,
+          heldProp: interaction.heldProp,
           phase: 'routing',
           path: state.actionQueue.length === 0 ? path : [],
           pathIndex: 0,
@@ -454,6 +528,7 @@ export const useGameStore = create<GameStoreState>()(
           needDeltas: interaction.needDeltas,
           animationPose: interaction.animationPose,
           emotionBoost: interaction.emotionBoost,
+          heldProp: interaction.heldProp,
           phase: 'routing',
           path: [],
           pathIndex: 0,
@@ -496,7 +571,7 @@ export const useGameStore = create<GameStoreState>()(
           return {
             actionQueue: nextQueue,
             sim: isFront
-              ? { ...state.sim, pose: 'idle', activeObjectId: null }
+              ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
               : state.sim,
           };
         });
@@ -515,6 +590,7 @@ export const useGameStore = create<GameStoreState>()(
               facingAngle,
               pose: 'walk',
               activeObjectId: null,
+              activeProp: null,
             },
             actionQueue: [{ ...front, pathIndex: nextPathIndex }, ...rest],
           };
@@ -537,7 +613,34 @@ export const useGameStore = create<GameStoreState>()(
             );
             return {
               actionQueue: nextQueue,
-              sim: { ...state.sim, pose: 'idle', activeObjectId: null },
+              sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
+            };
+          }
+
+          // Dresser / Mirror wardrobe actions pause Live Mode and open the in-world Wardrobe Studio
+          if (front.opensWardrobe) {
+            const nextQueue = preparePathForFrontAction(
+              rest,
+              state.sim,
+              state.placedObjects,
+              state.walls,
+            );
+            const facingAngle = front.facingAngle ?? state.sim.facingAngle;
+            simRuntime.facingAngle = facingAngle;
+
+            return {
+              wardrobeOpen: true,
+              pieMenu: null,
+              lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
+              speed: 0,
+              actionQueue: nextQueue,
+              sim: {
+                ...state.sim,
+                facingAngle,
+                pose: 'idle',
+                activeObjectId: null,
+                activeProp: null,
+              },
             };
           }
 
@@ -561,7 +664,7 @@ export const useGameStore = create<GameStoreState>()(
               return {
                 actionQueue: nextQueue,
                 feedbacks: nextFeedbacks.slice(-4),
-                sim: { ...state.sim, pose: 'idle', activeObjectId: null },
+                sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
               };
             }
             nextFunds -= front.cost;
@@ -584,6 +687,7 @@ export const useGameStore = create<GameStoreState>()(
               facingAngle,
               pose: front.animationPose,
               activeObjectId: front.targetObjectId ?? null,
+              activeProp: front.heldProp ?? null,
             },
             actionQueue: [
               {
@@ -615,7 +719,7 @@ export const useGameStore = create<GameStoreState>()(
           let nextFunds = state.funds;
           const nextFeedbacks = [...state.feedbacks];
 
-          // Daily creative stipend at 09:00 on new days (Day 2+)
+          // Daily creative stipend at midnight on new days (Day 2+)
           const prevDay = state.clock.day;
           if (day > prevDay) {
             nextFunds += 250;
@@ -652,6 +756,7 @@ export const useGameStore = create<GameStoreState>()(
                 ...nextSim,
                 pose: 'idle',
                 activeObjectId: null,
+                activeProp: null,
                 emotionBoost: boost,
               };
             } else {
@@ -683,7 +788,7 @@ export const useGameStore = create<GameStoreState>()(
 
       tryAutonomousDecision: () => {
         const state = get();
-        if (!state.freeWill || state.mode !== 'live' || state.actionQueue.length > 0) return;
+        if (!state.freeWill || state.mode !== 'live' || state.wardrobeOpen || state.actionQueue.length > 0) return;
         if (state.idleSimMinutes < 6) return;
 
         const choice = pickAutonomousAction(
@@ -900,7 +1005,7 @@ export const useGameStore = create<GameStoreState>()(
           ? state.actionQueue.filter((a) => a.targetObjectId !== sel.movingInstanceId)
           : state.actionQueue;
         const nextSim = wasUsingMoved
-          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null }
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
         const nextQueue = preparePathForFrontAction(
           filteredQueue,
@@ -940,7 +1045,7 @@ export const useGameStore = create<GameStoreState>()(
         );
         const wasUsingSold = state.sim.activeObjectId === sel.movingInstanceId;
         const nextSim = wasUsingSold
-          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null }
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
         const remainingQueue = state.actionQueue.filter(
           (a) => a.targetObjectId !== sel.movingInstanceId,
@@ -979,6 +1084,7 @@ export const useGameStore = create<GameStoreState>()(
         set({
           mode: 'live',
           wallMode: 'cutaway',
+          wardrobeOpen: false,
           speed: 1,
           lastLiveSpeed: 1,
           freeWill: true,
@@ -1017,6 +1123,7 @@ export const useGameStore = create<GameStoreState>()(
       }),
       partialize: (state) => ({
         wallMode: state.wallMode,
+        graphicsQuality: state.graphicsQuality,
         freeWill: state.freeWill,
         clock: state.clock,
         funds: state.funds,
@@ -1024,11 +1131,61 @@ export const useGameStore = create<GameStoreState>()(
           ...state.sim,
           pose: 'idle' as const,
           activeObjectId: null,
+          activeProp: null,
         },
         placedObjects: state.placedObjects,
       }),
       onRehydrateStorage: () => (state) => {
-        if (state?.sim) {
+        if (!state) return;
+        if (!state.graphicsQuality) {
+          state.graphicsQuality = 'high';
+        }
+        if (state.sim) {
+          // Backfill new Phase 2 appearance fields for existing Phase 1 saves
+          if (!state.sim.appearance.hairStyle) {
+            state.sim.appearance.hairStyle = 'bun';
+          }
+          if (!state.sim.appearance.eyeColor) {
+            state.sim.appearance.eyeColor = '#4c382a';
+          }
+          state.sim.activeProp = null;
+
+          // Backfill Bedroom Dresser & Arch Mirror if missing and their tiles are unobstructed
+          const hasDresser = state.placedObjects.some((o) => o.catalogId === 'oak_dresser');
+          const hasMirror = state.placedObjects.some((o) => o.catalogId === 'arch_mirror');
+          const simTile = { x: state.sim.tileX, z: state.sim.tileZ };
+
+          if (!hasDresser) {
+            const dresserItem = CATALOG_BY_ID.oak_dresser;
+            if (
+              dresserItem &&
+              isPlacementValid(dresserItem, 10, 7, 180, state.placedObjects, state.walls, { simTile })
+            ) {
+              state.placedObjects.push({
+                instanceId: 'obj_dresser_1',
+                catalogId: 'oak_dresser',
+                tileX: 10,
+                tileZ: 7,
+                rotation: 180,
+              });
+            }
+          }
+          if (!hasMirror) {
+            const mirrorItem = CATALOG_BY_ID.arch_mirror;
+            if (
+              mirrorItem &&
+              isPlacementValid(mirrorItem, 9, 4, 90, state.placedObjects, state.walls, { simTile })
+            ) {
+              state.placedObjects.push({
+                instanceId: 'obj_mirror_1',
+                catalogId: 'arch_mirror',
+                tileX: 9,
+                tileZ: 4,
+                rotation: 90,
+              });
+            }
+          }
+
           syncRuntimeToTile(state.sim.tileX, state.sim.tileZ, state.sim.facingAngle);
         }
       },

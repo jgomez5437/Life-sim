@@ -2,12 +2,13 @@ import { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { simRuntime } from '../engine/simRuntime';
+import { useGameStore } from '../store/gameStore';
 import { pointerGuard } from './pointerGuard';
 
 const MIN_RADIUS = 7.2;
 const MAX_RADIUS = 22.5;
-const MIN_POLAR = 0.46; // ~26 deg from vertical (high angle)
-const MAX_POLAR = 1.15; // ~66 deg from vertical (low angle)
+const MIN_POLAR = 0.46;
+const MAX_POLAR = 1.15;
 const PAN_LIMIT = 7.6;
 const DRAG_THRESHOLD_PX = 8;
 
@@ -22,8 +23,9 @@ interface ActivePointer {
 
 export function CameraRig() {
   const { camera, gl } = useThree();
+  const wardrobeOpen = useGameStore((s) => s.wardrobeOpen);
 
-  // Desired spherical + target state (damped every frame)
+  // Live/Build camera target & spherical orbit state
   const target = useRef(new THREE.Vector3(0.2, 0, -0.4));
   const currentTarget = useRef(new THREE.Vector3(0.2, 0, -0.4));
 
@@ -37,6 +39,19 @@ export function CameraRig() {
     azimuth: Math.PI * 0.22,
     polar: 0.92,
   });
+
+  // Wardrobe close-up framing state
+  const wardrobeAzimuth = useRef(0.35);
+  const wardrobeOpenRef = useRef(wardrobeOpen);
+  const focusTargetRef = useRef(new THREE.Vector3());
+
+  useEffect(() => {
+    if (wardrobeOpen && !wardrobeOpenRef.current) {
+      // Face Maya's front cleanly from a flattering 3/4 portrait angle
+      wardrobeAzimuth.current = simRuntime.facingAngle + 0.22;
+    }
+    wardrobeOpenRef.current = wardrobeOpen;
+  }, [wardrobeOpen]);
 
   useEffect(() => {
     const dom = gl.domElement;
@@ -91,8 +106,15 @@ export function CameraRig() {
         pointerGuard.wasDrag = true;
       }
 
+      // In Wardrobe Studio, 1-finger drag orbits 360° around Maya to inspect hairstyles & outfits
+      if (wardrobeOpenRef.current) {
+        if (pointers.size === 1) {
+          wardrobeAzimuth.current -= dx * 0.011;
+        }
+        return;
+      }
+
       if (pointers.size === 1) {
-        // Right mouse button or Shift+drag orbits camera on desktop
         if (p.button === 2 || e.shiftKey) {
           desiredSpherical.current.azimuth -= dx * 0.0075;
           desiredSpherical.current.polar = THREE.MathUtils.clamp(
@@ -103,7 +125,6 @@ export function CameraRig() {
           return;
         }
 
-        // Primary 1-finger touch / left-drag pans across ground plane relative to camera azimuth
         const az = currentSpherical.current.azimuth;
         const panScale = currentSpherical.current.radius * 0.00145;
 
@@ -125,7 +146,6 @@ export function CameraRig() {
         const angle = Math.atan2(b.y - a.y, b.x - a.x);
         const midY = (a.y + b.y) * 0.5;
 
-        // Pinch zoom
         if (prevPinchDist > 10 && dist > 10) {
           const zoomDelta = (prevPinchDist - dist) * 0.035;
           desiredSpherical.current.radius = THREE.MathUtils.clamp(
@@ -135,13 +155,11 @@ export function CameraRig() {
           );
         }
 
-        // Two-finger twist orbit
         let angleDelta = angle - prevPinchAngle;
         if (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
         if (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
         desiredSpherical.current.azimuth -= angleDelta * 1.15;
 
-        // Two-finger vertical tilt
         const tiltDelta = (midY - prevMidY) * 0.004;
         desiredSpherical.current.polar = THREE.MathUtils.clamp(
           desiredSpherical.current.polar - tiltDelta,
@@ -158,7 +176,6 @@ export function CameraRig() {
     const onPointerUpOrCancel = (e: PointerEvent) => {
       pointers.delete(e.pointerId);
       if (pointers.size === 0) {
-        // Delay clearing multiTouch slightly so click handlers in the same frame still see it
         window.setTimeout(() => {
           pointerGuard.isMultiTouch = false;
         }, 0);
@@ -166,6 +183,7 @@ export function CameraRig() {
     };
 
     const onWheel = (e: WheelEvent) => {
+      if (wardrobeOpenRef.current) return;
       e.preventDefault();
       desiredSpherical.current.radius = THREE.MathUtils.clamp(
         desiredSpherical.current.radius + e.deltaY * 0.012,
@@ -197,30 +215,59 @@ export function CameraRig() {
 
   useFrame((_, delta) => {
     const dt = Math.min(delta, 0.05);
-    const lerpFactor = 1 - Math.exp(-dt * 11);
+    const lerpFactor = 1 - Math.exp(-dt * 10);
 
-    if (simRuntime.focusSimRequested) {
-      target.current.x = THREE.MathUtils.clamp(simRuntime.worldX, -PAN_LIMIT, PAN_LIMIT);
-      target.current.z = THREE.MathUtils.clamp(simRuntime.worldZ, -PAN_LIMIT, PAN_LIMIT);
-      simRuntime.focusSimRequested = false;
+    if (wardrobeOpenRef.current) {
+      // Frame Maya cleanly on the left side of the mobile landscape viewport while WardrobePanel sits on the right
+      const az = wardrobeAzimuth.current;
+      const rightX = Math.cos(az);
+      const rightZ = -Math.sin(az);
+
+      focusTargetRef.current.set(
+        simRuntime.worldX + rightX * 0.62,
+        1.02,
+        simRuntime.worldZ + rightZ * 0.62,
+      );
+      currentTarget.current.lerp(focusTargetRef.current, lerpFactor);
+      currentSpherical.current.radius = THREE.MathUtils.lerp(
+        currentSpherical.current.radius,
+        3.25,
+        lerpFactor,
+      );
+      currentSpherical.current.azimuth = THREE.MathUtils.lerp(
+        currentSpherical.current.azimuth,
+        az,
+        lerpFactor,
+      );
+      currentSpherical.current.polar = THREE.MathUtils.lerp(
+        currentSpherical.current.polar,
+        1.34,
+        lerpFactor,
+      );
+    } else {
+      if (simRuntime.focusSimRequested) {
+        target.current.x = THREE.MathUtils.clamp(simRuntime.worldX, -PAN_LIMIT, PAN_LIMIT);
+        target.current.z = THREE.MathUtils.clamp(simRuntime.worldZ, -PAN_LIMIT, PAN_LIMIT);
+        simRuntime.focusSimRequested = false;
+      }
+
+      currentTarget.current.lerp(target.current, lerpFactor);
+      currentSpherical.current.radius = THREE.MathUtils.lerp(
+        currentSpherical.current.radius,
+        desiredSpherical.current.radius,
+        lerpFactor,
+      );
+      currentSpherical.current.azimuth = THREE.MathUtils.lerp(
+        currentSpherical.current.azimuth,
+        desiredSpherical.current.azimuth,
+        lerpFactor,
+      );
+      currentSpherical.current.polar = THREE.MathUtils.lerp(
+        currentSpherical.current.polar,
+        desiredSpherical.current.polar,
+        lerpFactor,
+      );
     }
-
-    currentTarget.current.lerp(target.current, lerpFactor);
-    currentSpherical.current.radius = THREE.MathUtils.lerp(
-      currentSpherical.current.radius,
-      desiredSpherical.current.radius,
-      lerpFactor,
-    );
-    currentSpherical.current.azimuth = THREE.MathUtils.lerp(
-      currentSpherical.current.azimuth,
-      desiredSpherical.current.azimuth,
-      lerpFactor,
-    );
-    currentSpherical.current.polar = THREE.MathUtils.lerp(
-      currentSpherical.current.polar,
-      desiredSpherical.current.polar,
-      lerpFactor,
-    );
 
     const { radius, azimuth, polar } = currentSpherical.current;
     const sinP = Math.sin(polar);

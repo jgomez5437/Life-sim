@@ -183,6 +183,7 @@ export function pickAutonomousAction(
     const dist = Math.hypot(slot.tile.x - simTile.x, slot.tile.z - simTile.z);
 
     for (const interaction of item.interactions) {
+      if (interaction.opensWardrobe) continue;
       const cost = interaction.cost ?? 0;
       if (cost > funds) continue;
       if (targetNeed && (interaction.needDeltas[targetNeed] ?? 0) <= 0) continue;

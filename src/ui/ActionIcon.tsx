@@ -10,6 +10,7 @@ import {
   Moon,
   PenTool,
   Phone,
+  Shirt,
   Smile,
   Sofa,
   Sparkles,
@@ -39,6 +40,8 @@ export function ActionIcon({ name, size = 15 }: { name: string; size?: number })
       return <PenTool size={size} />;
     case 'phone':
       return <Phone size={size} />;
+    case 'shirt':
+      return <Shirt size={size} />;
     case 'tv':
       return <Tv size={size} />;
     case 'gamepad':

@@ -133,4 +133,92 @@ describe('needs decay, emotion calculation, autonomy, and store economy', () => 
     expect(state.actionQueue[0].kind).toBe('self');
     expect(state.actionQueue[0].interactionId).toBe('call_friend');
   });
+
+  it('routes Maya to Bedroom Dresser, Arch Mirror, or Vanity Sink to open Wardrobe Studio and restores speed on close', () => {
+    const store = useGameStore.getState();
+    store.resetStarterLot();
+    useGameStore.getState().setSpeed(3);
+
+    // Queue Plan Outfits on Bedroom Dresser
+    expect(useGameStore.getState().enqueueObjectInteraction('obj_dresser_1', 'plan_outfits')).toBe(
+      true,
+    );
+    expect(useGameStore.getState().actionQueue[0].opensWardrobe).toBe(true);
+
+    // Arriving at dresser opens Wardrobe Studio, pauses sim clock, and clears the wardrobe action
+    useGameStore.getState().beginPerformingActiveAction();
+    let state = useGameStore.getState();
+    expect(state.wardrobeOpen).toBe(true);
+    expect(state.speed).toBe(0);
+    expect(state.actionQueue.length).toBe(0);
+
+    // Live appearance updates apply cleanly
+    useGameStore.getState().updateSimAppearance({
+      hairStyle: 'waves',
+      eyeColor: '#2f6f99',
+      topColor: '#5d9379',
+    });
+    expect(useGameStore.getState().sim.appearance.hairStyle).toBe('waves');
+    expect(useGameStore.getState().sim.appearance.eyeColor).toBe('#2f6f99');
+    expect(useGameStore.getState().sim.appearance.topColor).toBe('#5d9379');
+
+    // Closing Wardrobe Studio restores prior live speed (3x)
+    useGameStore.getState().closeWardrobe(true);
+    state = useGameStore.getState();
+    expect(state.wardrobeOpen).toBe(false);
+    expect(state.speed).toBe(3);
+
+    // Also verify Arch Mirror and Bathroom Vanity Sink can open Wardrobe Studio
+    expect(useGameStore.getState().enqueueObjectInteraction('obj_mirror_1', 'change_appearance')).toBe(
+      true,
+    );
+    useGameStore.getState().beginPerformingActiveAction();
+    expect(useGameStore.getState().wardrobeOpen).toBe(true);
+    useGameStore.getState().closeWardrobe(false);
+
+    expect(useGameStore.getState().enqueueObjectInteraction('obj_sink_1', 'change_appearance')).toBe(
+      true,
+    );
+    useGameStore.getState().beginPerformingActiveAction();
+    expect(useGameStore.getState().wardrobeOpen).toBe(true);
+    useGameStore.getState().closeWardrobe(false);
+  });
+
+  it('never picks wardrobe-opening dresser/mirror interactions autonomously via Free Will', () => {
+    const sim = createInitialSim();
+    // Neutral needs where fun/hygiene/social might look attractive
+    sim.needs = {
+      hunger: 75,
+      energy: 75,
+      bladder: 75,
+      hygiene: 75,
+      fun: 75,
+      social: 75,
+    };
+
+    for (let i = 0; i < 15; i += 1) {
+      const pick = pickAutonomousAction(sim, STARTER_OBJECTS, STARTER_WALLS, 1000);
+      expect(pick?.interactionId).not.toBe('plan_outfits');
+      expect(pick?.interactionId).not.toBe('change_appearance');
+    }
+  });
+
+  it('tracks held props during active interactions and clears them on completion or cancellation', () => {
+    const store = useGameStore.getState();
+    store.resetStarterLot();
+
+    expect(useGameStore.getState().enqueueSelfInteraction('call_friend')).toBe(true);
+    useGameStore.getState().beginPerformingActiveAction();
+    expect(useGameStore.getState().sim.activeProp).toBe('phone');
+
+    // Completing the action clears activeProp
+    useGameStore.getState().tickSimMinutes(25);
+    expect(useGameStore.getState().sim.activeProp).toBeNull();
+
+    // Graphics quality toggle updates store cleanly
+    useGameStore.getState().setGraphicsQuality('balanced');
+    expect(useGameStore.getState().graphicsQuality).toBe('balanced');
+    useGameStore.getState().setGraphicsQuality('high');
+    expect(useGameStore.getState().graphicsQuality).toBe('high');
+  });
 });
