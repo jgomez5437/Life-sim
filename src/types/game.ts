@@ -115,7 +115,7 @@ export interface RoomDef {
 
 export interface ActionQueueItem {
   id: string;
-  kind: 'walk' | 'object' | 'self';
+  kind: 'walk' | 'object' | 'self' | 'commute';
   label: string;
   icon: string;
   targetObjectId?: string;
@@ -131,6 +131,10 @@ export interface ActionQueueItem {
   emotionBoost?: EmotionType;
   opensWardrobe?: boolean;
   heldProp?: HeldPropType;
+  contactId?: string;
+  relationshipDelta?: number;
+  socialPostText?: string;
+  deliveryItemId?: string;
   phase: 'routing' | 'performing';
   path: TileCoord[];
   pathIndex: number;
@@ -169,6 +173,7 @@ export interface SimState {
   pose: AnimationPose;
   activeObjectId: string | null;
   activeProp: HeldPropType | null;
+  awayAtWork: boolean;
 }
 
 export interface GameClock {
@@ -216,3 +221,197 @@ export interface FloatingFeedback {
   tone: 'positive' | 'negative' | 'info';
   createdAt: number;
 }
+
+/* ======================== SMARTPHONE & SOCIAL TYPES ======================== */
+
+export type PhoneAppId = 'home' | 'social' | 'career' | 'order' | 'entertainment';
+
+export type PhoneCaseId =
+  | 'coastal_mint'
+  | 'coral_sunset'
+  | 'midnight_slate'
+  | 'lavender_haze'
+  | 'honey_gold'
+  | 'botanical_sage';
+
+export interface PhoneCaseStyle {
+  id: PhoneCaseId;
+  name: string;
+  frameColor: string;
+  accentColor: string;
+  meshColor: string;
+}
+
+export type RelationshipTier = 'acquaintance' | 'friend' | 'good_friend' | 'best_friend';
+
+export interface NpcContact {
+  id: string;
+  name: string;
+  role: string;
+  bio: string;
+  traits: string[];
+  avatarColor: string;
+  hairColor: string;
+  skinColor: string;
+  relationship: number;
+  lastInteractedDay: number;
+}
+
+export interface SocialPost {
+  id: string;
+  authorName: string;
+  authorColor: string;
+  text: string;
+  day: number;
+  hour: number;
+  minute: number;
+  likes: number;
+  tag: 'friend' | 'career' | 'lifestyle';
+}
+
+export interface PhoneSocialActionDef {
+  id: string;
+  label: string;
+  icon: string;
+  durationSimMinutes: number;
+  relationshipDelta: number;
+  needDeltas: Partial<Record<NeedKey, number>>;
+  emotionBoost?: EmotionType;
+  postTemplate: (contactName: string) => string;
+}
+
+export interface DeliveryItemDef {
+  id: string;
+  name: string;
+  category: 'food' | 'service';
+  description: string;
+  icon: string;
+  cost: number;
+  needDeltas: Partial<Record<NeedKey, number>>;
+  emotionBoost?: EmotionType;
+  postText: string;
+}
+
+/* ======================== CAREER & JOB SYSTEM TYPES ======================== */
+
+export type CareerTrackId = 'culinary' | 'tech_guru' | 'painter' | 'writer' | 'barista';
+
+export type WorkTone = 'normal' | 'work_hard' | 'take_easy' | 'socialize';
+
+export type ShiftDayChoice = 'rabbit_hole' | 'wfh' | 'pto' | 'sick' | 'completed' | 'skipped';
+
+export interface CareerTaskRule {
+  id: string;
+  label: string;
+  hint: string;
+  targetCount: number;
+  matchingInteractionIds: string[];
+}
+
+export interface CareerLevelDef {
+  level: number;
+  title: string;
+  hourlyPay: number;
+  shiftStartHour: number;
+  shiftDurationHours: number;
+  /** 0 = Mon, 1 = Tue, ..., 6 = Sun */
+  workDays: number[];
+  promotionBonus: number;
+  idealEmotion: EmotionType;
+  dailyTask: CareerTaskRule;
+}
+
+export interface ChanceCardOption {
+  label: string;
+  sublabel: string;
+  outcomeText: string;
+  performanceDelta: number;
+  fundsDelta?: number;
+  emotionBoost?: EmotionType;
+  relationshipBoost?: number;
+}
+
+export interface ChanceCardDef {
+  id: string;
+  title: string;
+  scenario: string;
+  options: [ChanceCardOption, ChanceCardOption];
+}
+
+export interface CareerDef {
+  id: CareerTrackId;
+  name: string;
+  category: 'Full-Time' | 'Part-Time';
+  tagline: string;
+  accentColor: string;
+  icon: string;
+  levels: CareerLevelDef[];
+  wfhTaskPool: CareerTaskRule[];
+  chanceCards: ChanceCardDef[];
+}
+
+export interface WfhTaskProgress {
+  ruleId: string;
+  label: string;
+  hint: string;
+  matchingInteractionIds: string[];
+  progress: number;
+  targetCount: number;
+}
+
+export interface SimCareerState {
+  careerId: CareerTrackId;
+  level: number;
+  /** 0 to 100 */
+  performance: number;
+  dailyTaskProgress: number;
+  /** Accrued PTO credits; integer part is usable vacation days */
+  ptoDays: number;
+  shiftsCompleted: number;
+  totalEarned: number;
+  /** Tracks which clock.day the shiftChoiceForDay & shiftPrompt apply to */
+  activeDayMarker: number;
+  shiftChoiceForDay: ShiftDayChoice | null;
+  promptShownForDay: number;
+  wfhActive: boolean;
+  wfhTasks: WfhTaskProgress[];
+  wfhPaidToday: boolean;
+}
+
+export interface ActiveShiftState {
+  careerId: CareerTrackId;
+  level: number;
+  day: number;
+  startTotalMinutes: number;
+  endTotalMinutes: number;
+  tone: WorkTone;
+  chanceCardTriggered: boolean;
+  performanceGained: number;
+  workedMinutes: number;
+}
+
+export interface ShiftPromptState {
+  day: number;
+  careerId: CareerTrackId;
+  level: number;
+  shiftStartHour: number;
+  shiftDurationHours: number;
+}
+
+export interface ActiveChanceCardState {
+  card: ChanceCardDef;
+  careerName: string;
+  resolvedOptionIndex?: number;
+}
+
+export interface PromotionSummary {
+  careerName: string;
+  oldTitle: string;
+  newTitle: string;
+  newLevel: number;
+  oldHourlyPay: number;
+  newHourlyPay: number;
+  bonus: number;
+  dailyTaskLabel: string;
+}
+

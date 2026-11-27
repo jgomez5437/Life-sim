@@ -1,6 +1,13 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
+import { CAREERS_BY_ID } from '../data/careers';
 import { CATALOG_BY_ID, SELF_INTERACTIONS } from '../data/catalog';
+import {
+  DELIVERY_ITEMS,
+  PHONE_SOCIAL_ACTIONS,
+  createInitialContacts,
+  createInitialSocialFeed,
+} from '../data/phoneData';
 import {
   INITIAL_FUNDS,
   STARTER_OBJECTS,
@@ -8,6 +15,22 @@ import {
   createInitialClock,
   createInitialSim,
 } from '../data/starterLot';
+import {
+  COMMUTE_STREET_TILE,
+  RETURN_HOME_TILE,
+  applyWorkShiftNeedTick,
+  canPromote,
+  computeShiftPay,
+  computeShiftPerformanceDelta,
+  createInitialCareerState,
+  formatHour12,
+  generateWfhTasksForDay,
+  getCareerLevel,
+  getNextCareerLevel,
+  getShiftWindowForDay,
+  isWorkday,
+  pickChanceCardForCareer,
+} from '../engine/careers';
 import {
   getBestInteractionSlot,
   isInLotBounds,
@@ -22,23 +45,35 @@ import {
   decayNeeds,
   pickAutonomousAction,
 } from '../engine/simulation';
+import { clampRelationship, createSocialPost } from '../engine/social';
 import type {
   ActionQueueItem,
+  ActiveChanceCardState,
+  ActiveShiftState,
   BuildSelection,
+  CareerTrackId,
   FloatingFeedback,
   GameClock,
   GameMode,
   GraphicsQuality,
   NeedKey,
+  NpcContact,
+  PhoneAppId,
+  PhoneCaseId,
   PieMenuTarget,
   PlacedObject,
+  PromotionSummary,
   RotationDeg,
+  ShiftPromptState,
   SimAppearance,
+  SimCareerState,
   SimSpeed,
   SimState,
+  SocialPost,
   TileCoord,
   WallSegment,
   WallViewMode,
+  WorkTone,
 } from '../types/game';
 
 const MAX_QUEUE_LENGTH = 6;
@@ -69,6 +104,21 @@ export interface GameStoreState {
   feedbacks: FloatingFeedback[];
   idleSimMinutes: number;
 
+  // Smartphone, Social & Delivery state
+  phoneOpen: boolean;
+  phoneApp: PhoneAppId;
+  phoneCaseId: PhoneCaseId;
+  phoneHasBadge: boolean;
+  contacts: NpcContact[];
+  socialFeed: SocialPost[];
+
+  // Career & Job System state
+  career: SimCareerState | null;
+  shiftPrompt: ShiftPromptState | null;
+  activeShift: ActiveShiftState | null;
+  activeChanceCard: ActiveChanceCardState | null;
+  promotionSummary: PromotionSummary | null;
+
   // Mode & HUD actions
   setMode: (mode: GameMode) => void;
   cycleWallMode: () => void;
@@ -80,6 +130,28 @@ export interface GameStoreState {
   addFeedback: (text: string, tone?: FloatingFeedback['tone']) => void;
   pruneFeedbacks: () => void;
   focusCameraOnSim: () => void;
+
+  // Smartphone, Social & Delivery actions
+  togglePhone: () => void;
+  openPhone: (app?: PhoneAppId) => void;
+  closePhone: () => void;
+  setPhoneApp: (app: PhoneAppId) => void;
+  setPhoneCase: (caseId: PhoneCaseId) => void;
+  enqueueContactInteraction: (contactId: string, socialActionId: string) => boolean;
+  orderDelivery: (deliveryItemId: string) => boolean;
+
+  // Career & Job System actions
+  joinCareer: (careerId: CareerTrackId) => void;
+  quitCareer: () => void;
+  chooseShiftMode: (choice: 'rabbit_hole' | 'wfh' | 'pto') => boolean;
+  dismissShiftPrompt: () => void;
+  goToWorkNow: () => boolean;
+  callInSick: () => boolean;
+  setWorkTone: (tone: WorkTone) => void;
+  leaveWorkEarly: () => void;
+  resolveChanceCard: (optionIndex: 0 | 1) => void;
+  dismissChanceCard: () => void;
+  dismissPromotionSummary: () => void;
 
   // In-world Wardrobe actions (triggered via dresser/mirror)
   openWardrobe: () => void;
@@ -205,6 +277,59 @@ function preparePathForFrontAction(
   return [];
 }
 
+function buildCommuteAction(
+  sim: SimState,
+  placedObjects: PlacedObject[],
+  walls: WallSegment[],
+  careerName: string,
+): ActionQueueItem | null {
+  const startTile = { x: sim.tileX, z: sim.tileZ };
+  const path = findPath(startTile, COMMUTE_STREET_TILE, placedObjects, walls);
+  if (path === null) return null;
+  return {
+    id: nextId('act'),
+    kind: 'commute',
+    label: `Go to ${careerName}`,
+    icon: 'briefcase',
+    targetTile: { ...COMMUTE_STREET_TILE },
+    durationSimMinutes: 0,
+    elapsedSimMinutes: 0,
+    cost: 0,
+    costPaid: true,
+    needDeltas: {},
+    animationPose: 'walk',
+    phase: 'routing',
+    path,
+    pathIndex: 0,
+  };
+}
+
+function buildReturnHomeAction(
+  placedObjects: PlacedObject[],
+  walls: WallSegment[],
+): ActionQueueItem[] {
+  const path = findPath(COMMUTE_STREET_TILE, RETURN_HOME_TILE, placedObjects, walls);
+  if (!path || path.length === 0) return [];
+  return [
+    {
+      id: nextId('act'),
+      kind: 'walk',
+      label: 'Return Home',
+      icon: 'footprints',
+      targetTile: { ...RETURN_HOME_TILE },
+      durationSimMinutes: 0,
+      elapsedSimMinutes: 0,
+      cost: 0,
+      costPaid: true,
+      needDeltas: {},
+      animationPose: 'walk',
+      phase: 'routing',
+      path,
+      pathIndex: 0,
+    },
+  ];
+}
+
 export const useGameStore = create<GameStoreState>()(
   persist(
     (set, get) => ({
@@ -226,6 +351,21 @@ export const useGameStore = create<GameStoreState>()(
       feedbacks: [],
       idleSimMinutes: 0,
 
+      // Smartphone, Social & Delivery state
+      phoneOpen: false,
+      phoneApp: 'home',
+      phoneCaseId: 'coastal_mint',
+      phoneHasBadge: false,
+      contacts: createInitialContacts(),
+      socialFeed: createInitialSocialFeed(),
+
+      // Career & Job System state
+      career: null,
+      shiftPrompt: null,
+      activeShift: null,
+      activeChanceCard: null,
+      promotionSummary: null,
+
       setMode: (mode) => {
         const state = get();
         if (state.mode === mode) return;
@@ -233,6 +373,7 @@ export const useGameStore = create<GameStoreState>()(
           set({
             mode: 'build',
             wardrobeOpen: false,
+            phoneOpen: false,
             lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
             speed: 0,
             pieMenu: null,
@@ -287,9 +428,626 @@ export const useGameStore = create<GameStoreState>()(
           ],
         })),
 
+      togglePhone: () =>
+        set((state) => {
+          if (state.mode !== 'live' || state.wardrobeOpen) return state;
+          const nextOpen = !state.phoneOpen;
+          return {
+            phoneOpen: nextOpen,
+            phoneHasBadge: nextOpen ? false : state.phoneHasBadge,
+            pieMenu: null,
+          };
+        }),
+
+      openPhone: (app) =>
+        set((state) => {
+          if (state.mode !== 'live' || state.wardrobeOpen) return state;
+          return {
+            phoneOpen: true,
+            phoneApp: app ?? state.phoneApp,
+            phoneHasBadge: false,
+            pieMenu: null,
+          };
+        }),
+
+      closePhone: () => set({ phoneOpen: false }),
+
+      setPhoneApp: (phoneApp) => set({ phoneApp, phoneHasBadge: false }),
+
+      setPhoneCase: (phoneCaseId) =>
+        set((state) => ({
+          phoneCaseId,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: 'Phone Case Updated!',
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        })),
+
+      enqueueContactInteraction: (contactId, socialActionId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const contact = state.contacts.find((c) => c.id === contactId);
+        const socialAction = PHONE_SOCIAL_ACTIONS.find((a) => a.id === socialActionId);
+        if (!contact || !socialAction) return false;
+
+        const plannedTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'self',
+          label: `${socialAction.label}: ${contact.name.split(' ')[0]}`,
+          icon: socialAction.icon,
+          interactionId: socialAction.id,
+          targetTile: plannedTile,
+          durationSimMinutes: socialAction.durationSimMinutes,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: socialAction.needDeltas,
+          animationPose: 'phone',
+          emotionBoost: socialAction.emotionBoost,
+          heldProp: 'phone',
+          contactId: contact.id,
+          relationshipDelta: socialAction.relationshipDelta,
+          socialPostText: socialAction.postTemplate(contact.name),
+          phase: 'routing',
+          path: [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      orderDelivery: (deliveryItemId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Wait until Maya gets home to order!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const item = DELIVERY_ITEMS.find((d) => d.id === deliveryItemId);
+        if (!item) return false;
+        if (state.funds < item.cost) {
+          state.addFeedback(`Need §${item.cost} Simoleons`, 'negative');
+          return false;
+        }
+
+        const plannedTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'self',
+          label: `Order ${item.name}`,
+          icon: item.icon,
+          interactionId: item.id,
+          targetTile: plannedTile,
+          durationSimMinutes: 10,
+          elapsedSimMinutes: 0,
+          cost: item.cost,
+          costPaid: false,
+          needDeltas: item.needDeltas,
+          animationPose: 'phone',
+          emotionBoost: item.emotionBoost,
+          heldProp: 'phone',
+          deliveryItemId: item.id,
+          socialPostText: item.postText,
+          phase: 'routing',
+          path: [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      joinCareer: (careerId) => {
+        const state = get();
+        const careerDef = CAREERS_BY_ID[careerId];
+        if (!careerDef) return;
+
+        // If switching while away at work, bring Maya home cleanly first
+        const wasAway = state.sim.awayAtWork;
+        if (wasAway) {
+          syncRuntimeToTile(RETURN_HOME_TILE.x, RETURN_HOME_TILE.z, 0);
+        }
+
+        const nextCareer = createInitialCareerState(careerId, state.clock.day);
+        const levelDef = getCareerLevel(careerId, 1);
+
+        // If hired right inside or within 60 mins of today's shift, surface the Shift Prompt immediately
+        let nextPrompt: ShiftPromptState | null = null;
+        if (isWorkday(levelDef, state.clock.day)) {
+          const { startTotalMinutes, endTotalMinutes } = getShiftWindowForDay(
+            levelDef,
+            state.clock.day,
+          );
+          if (
+            state.clock.totalMinutes >= startTotalMinutes - 60 &&
+            state.clock.totalMinutes < endTotalMinutes - 30
+          ) {
+            nextPrompt = {
+              day: state.clock.day,
+              careerId,
+              level: 1,
+              shiftStartHour: levelDef.shiftStartHour,
+              shiftDurationHours: levelDef.shiftDurationHours,
+            };
+            nextCareer.promptShownForDay = state.clock.day;
+          }
+        }
+
+        const post = createSocialPost({
+          id: nextId('post'),
+          authorName: state.sim.name,
+          authorColor: state.sim.appearance.topColor,
+          text: `Big news! Just started as a ${levelDef.title} in the ${careerDef.name} career!`,
+          clock: state.clock,
+          tag: 'career',
+        });
+
+        set({
+          career: nextCareer,
+          activeShift: null,
+          activeChanceCard: null,
+          shiftPrompt: nextPrompt,
+          socialFeed: [post, ...state.socialFeed].slice(0, 18),
+          sim: wasAway
+            ? {
+                ...state.sim,
+                awayAtWork: false,
+                tileX: RETURN_HOME_TILE.x,
+                tileZ: RETURN_HOME_TILE.z,
+                pose: 'idle',
+                activeObjectId: null,
+                activeProp: null,
+              }
+            : state.sim,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `Hired as ${levelDef.title} (§${levelDef.hourlyPay}/hr)!`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+      },
+
+      quitCareer: () => {
+        const state = get();
+        if (!state.career) return;
+        const careerDef = CAREERS_BY_ID[state.career.careerId];
+        const wasAway = state.sim.awayAtWork;
+        if (wasAway) {
+          syncRuntimeToTile(RETURN_HOME_TILE.x, RETURN_HOME_TILE.z, 0);
+        }
+
+        set({
+          career: null,
+          activeShift: null,
+          shiftPrompt: null,
+          activeChanceCard: null,
+          promotionSummary: null,
+          actionQueue: state.actionQueue.filter((a) => a.kind !== 'commute'),
+          sim: wasAway
+            ? {
+                ...state.sim,
+                awayAtWork: false,
+                tileX: RETURN_HOME_TILE.x,
+                tileZ: RETURN_HOME_TILE.z,
+                pose: 'idle',
+                activeObjectId: null,
+                activeProp: null,
+              }
+            : state.sim,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `Left ${careerDef.name} career`,
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+      },
+
+      chooseShiftMode: (choice) => {
+        const state = get();
+        if (!state.career) return false;
+        const careerDef = CAREERS_BY_ID[state.career.careerId];
+        const levelDef = getCareerLevel(state.career.careerId, state.career.level);
+        const day = state.clock.day;
+
+        if (choice === 'pto') {
+          if (Math.floor(state.career.ptoDays) < 1) {
+            state.addFeedback('No PTO days earned yet', 'negative');
+            return false;
+          }
+          const ptoPay = levelDef.hourlyPay * levelDef.shiftDurationHours;
+          set({
+            funds: state.funds + ptoPay,
+            shiftPrompt: null,
+            career: {
+              ...state.career,
+              ptoDays: Math.max(0, state.career.ptoDays - 1),
+              totalEarned: state.career.totalEarned + ptoPay,
+              activeDayMarker: day,
+              shiftChoiceForDay: 'pto',
+              wfhActive: false,
+              wfhTasks: [],
+            },
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `Paid Vacation Day! +§${ptoPay}`,
+                tone: 'positive',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          return true;
+        }
+
+        if (choice === 'wfh') {
+          const wfhTasks = generateWfhTasksForDay(careerDef);
+          set({
+            shiftPrompt: null,
+            phoneOpen: false,
+            career: {
+              ...state.career,
+              activeDayMarker: day,
+              shiftChoiceForDay: 'wfh',
+              wfhActive: true,
+              wfhTasks,
+              wfhPaidToday: false,
+            },
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `Working From Home (${wfhTasks.length} tasks ready)`,
+                tone: 'positive',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          return true;
+        }
+
+        // choice === 'rabbit_hole'
+        const { startTotalMinutes, endTotalMinutes } = getShiftWindowForDay(levelDef, day);
+        const inShiftWindow =
+          isWorkday(levelDef, day) &&
+          state.clock.totalMinutes >= startTotalMinutes - 15 &&
+          state.clock.totalMinutes < endTotalMinutes - 30;
+
+        if (!inShiftWindow) {
+          set({
+            shiftPrompt: null,
+            career: {
+              ...state.career,
+              activeDayMarker: day,
+              shiftChoiceForDay: 'rabbit_hole',
+              wfhActive: false,
+            },
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `Heading to work at ${formatHour12(levelDef.shiftStartHour)}`,
+                tone: 'info',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          return true;
+        }
+
+        return get().goToWorkNow();
+      },
+
+      dismissShiftPrompt: () => set({ shiftPrompt: null }),
+
+      goToWorkNow: () => {
+        const state = get();
+        if (!state.career || state.sim.awayAtWork || state.activeShift) return false;
+        const careerDef = CAREERS_BY_ID[state.career.careerId];
+        const levelDef = getCareerLevel(state.career.careerId, state.career.level);
+        const day = state.clock.day;
+
+        if (!isWorkday(levelDef, day)) {
+          state.addFeedback('Today is a scheduled day off!', 'info');
+          return false;
+        }
+        const { startTotalMinutes, endTotalMinutes } = getShiftWindowForDay(levelDef, day);
+        if (state.clock.totalMinutes < startTotalMinutes - 60) {
+          state.addFeedback(
+            `Shift starts at ${formatHour12(levelDef.shiftStartHour)}`,
+            'info',
+          );
+          return false;
+        }
+        if (state.clock.totalMinutes >= endTotalMinutes - 20) {
+          state.addFeedback('Today’s shift has already ended', 'info');
+          return false;
+        }
+
+        const commute = buildCommuteAction(
+          state.sim,
+          state.placedObjects,
+          state.walls,
+          careerDef.name,
+        );
+
+        if (commute) {
+          set({
+            shiftPrompt: null,
+            phoneOpen: false,
+            pieMenu: null,
+            actionQueue: [commute],
+            career: {
+              ...state.career,
+              activeDayMarker: day,
+              shiftChoiceForDay: 'rabbit_hole',
+              wfhActive: false,
+            },
+            sim: { ...state.sim, pose: 'walk', activeObjectId: null, activeProp: null },
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `Heading to ${careerDef.name} shift!`,
+                tone: 'info',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+          return true;
+        }
+
+        // Fallback if street path is blocked: transition directly into shift so player is never soft-locked
+        const shiftEnd = Math.max(
+          endTotalMinutes,
+          state.clock.totalMinutes + 60,
+        );
+        set({
+          shiftPrompt: null,
+          phoneOpen: false,
+          pieMenu: null,
+          actionQueue: [],
+          career: {
+            ...state.career,
+            activeDayMarker: day,
+            shiftChoiceForDay: 'rabbit_hole',
+            wfhActive: false,
+          },
+          sim: {
+            ...state.sim,
+            awayAtWork: true,
+            pose: 'idle',
+            activeObjectId: null,
+            activeProp: null,
+          },
+          activeShift: {
+            careerId: state.career.careerId,
+            level: state.career.level,
+            day,
+            startTotalMinutes: state.clock.totalMinutes,
+            endTotalMinutes: shiftEnd,
+            tone: 'normal',
+            chanceCardTriggered: false,
+            performanceGained: 0,
+            workedMinutes: 0,
+          },
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `Started ${careerDef.name} shift!`,
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      callInSick: () => {
+        const state = get();
+        if (!state.career || state.sim.awayAtWork) return false;
+        const day = state.clock.day;
+        set({
+          shiftPrompt: null,
+          career: {
+            ...state.career,
+            activeDayMarker: day,
+            shiftChoiceForDay: 'sick',
+            wfhActive: false,
+            wfhTasks: [],
+            performance: Math.max(0, state.career.performance - 4),
+          },
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: 'Called in sick — get some rest!',
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      setWorkTone: (tone) =>
+        set((state) => {
+          if (!state.activeShift) return state;
+          return {
+            activeShift: {
+              ...state.activeShift,
+              tone,
+            },
+          };
+        }),
+
+      leaveWorkEarly: () => {
+        const state = get();
+        if (!state.activeShift || !state.career) return;
+        const levelDef = getCareerLevel(state.career.careerId, state.career.level);
+        const partialPay = computeShiftPay(levelDef, state.activeShift.workedMinutes);
+        syncRuntimeToTile(COMMUTE_STREET_TILE.x, COMMUTE_STREET_TILE.z, Math.PI);
+        const returnQueue = buildReturnHomeAction(state.placedObjects, state.walls);
+
+        set({
+          funds: state.funds + partialPay,
+          activeShift: null,
+          activeChanceCard: null,
+          actionQueue: returnQueue,
+          career: {
+            ...state.career,
+            shiftChoiceForDay: 'completed',
+            performance: Math.max(0, state.career.performance - 8),
+            totalEarned: state.career.totalEarned + partialPay,
+          },
+          sim: {
+            ...state.sim,
+            awayAtWork: false,
+            tileX: COMMUTE_STREET_TILE.x,
+            tileZ: COMMUTE_STREET_TILE.z,
+            pose: 'idle',
+            activeObjectId: null,
+            activeProp: null,
+          },
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text:
+                partialPay > 0
+                  ? `Left work early (+§${partialPay})`
+                  : 'Left work early',
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+      },
+
+      resolveChanceCard: (optionIndex) => {
+        const state = get();
+        if (!state.activeChanceCard || state.activeChanceCard.resolvedOptionIndex !== undefined) {
+          return;
+        }
+        const opt = state.activeChanceCard.card.options[optionIndex];
+        let nextFunds = state.funds + (opt.fundsDelta ?? 0);
+        if (nextFunds < 0) nextFunds = 0;
+
+        let nextCareer = state.career;
+        if (nextCareer) {
+          nextCareer = {
+            ...nextCareer,
+            performance: Math.max(0, Math.min(100, nextCareer.performance + opt.performanceDelta)),
+            totalEarned: nextCareer.totalEarned + Math.max(0, opt.fundsDelta ?? 0),
+          };
+        }
+
+        let nextContacts = state.contacts;
+        if (opt.relationshipBoost && nextContacts.length > 0) {
+          // Boost top coworker/friend contact
+          const boostIdx = state.clock.day % nextContacts.length;
+          nextContacts = nextContacts.map((c, idx) =>
+            idx === boostIdx
+              ? {
+                  ...c,
+                  relationship: clampRelationship(c.relationship + opt.relationshipBoost!),
+                  lastInteractedDay: state.clock.day,
+                }
+              : c,
+          );
+        }
+
+        const nextBoost = opt.emotionBoost
+          ? { type: opt.emotionBoost, expiresAtSimMinute: state.clock.totalMinutes + 240 }
+          : state.sim.emotionBoost;
+
+        set({
+          funds: nextFunds,
+          career: nextCareer,
+          contacts: nextContacts,
+          activeChanceCard: {
+            ...state.activeChanceCard,
+            resolvedOptionIndex: optionIndex,
+          },
+          sim: {
+            ...state.sim,
+            emotionBoost: nextBoost,
+            emotion: computeEmotion(state.sim.needs, nextBoost, state.clock.totalMinutes),
+          },
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: opt.fundsDelta
+                ? `Work Dilemma: +§${opt.fundsDelta} & +${opt.performanceDelta}% Perf`
+                : `Work Dilemma: +${opt.performanceDelta}% Performance`,
+              tone: opt.performanceDelta >= 0 ? 'positive' : 'negative',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+      },
+
+      dismissChanceCard: () =>
+        set((state) => ({
+          activeChanceCard: null,
+          speed: state.lastLiveSpeed || 1,
+        })),
+
+      dismissPromotionSummary: () =>
+        set((state) => ({
+          promotionSummary: null,
+          speed: state.lastLiveSpeed || 1,
+        })),
+
       openWardrobe: () =>
         set((state) => ({
           wardrobeOpen: true,
+          phoneOpen: false,
           pieMenu: null,
           lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
           speed: 0,
@@ -352,7 +1110,7 @@ export const useGameStore = create<GameStoreState>()(
           };
         }),
 
-      openPieMenu: (target) => set({ pieMenu: target }),
+      openPieMenu: (target) => set({ pieMenu: target, phoneOpen: false }),
       closePieMenu: () => set({ pieMenu: null }),
 
       addFeedback: (text, tone = 'info') =>
@@ -371,11 +1129,20 @@ export const useGameStore = create<GameStoreState>()(
         }),
 
       focusCameraOnSim: () => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is currently at work', 'info');
+          return;
+        }
         simRuntime.focusSimRequested = true;
       },
 
       enqueueWalk: (tile) => {
         const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
         if (!isInLotBounds(tile.x, tile.z)) return false;
         if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
           state.addFeedback('Action queue is full', 'info');
@@ -427,6 +1194,10 @@ export const useGameStore = create<GameStoreState>()(
 
       enqueueObjectInteraction: (objectId, interactionId) => {
         const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
         if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
           state.addFeedback('Action queue is full', 'info');
           return false;
@@ -495,6 +1266,10 @@ export const useGameStore = create<GameStoreState>()(
 
       enqueueSelfInteraction: (interactionId) => {
         const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
         if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
           state.addFeedback('Action queue is full', 'info');
           return false;
@@ -544,6 +1319,10 @@ export const useGameStore = create<GameStoreState>()(
 
       enqueueBestForNeed: (needKey) => {
         const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
         const choice = pickAutonomousAction(
           state.sim,
           state.placedObjects,
@@ -563,13 +1342,34 @@ export const useGameStore = create<GameStoreState>()(
 
       cancelAction: (actionId) => {
         set((state) => {
+          const cancelled = state.actionQueue.find((a) => a.id === actionId);
           const isFront = state.actionQueue[0]?.id === actionId;
           const remaining = state.actionQueue.filter((a) => a.id !== actionId);
           const nextQueue = isFront
             ? preparePathForFrontAction(remaining, state.sim, state.placedObjects, state.walls)
             : remaining;
+          const isCommuteCancel = cancelled?.kind === 'commute';
           return {
             actionQueue: nextQueue,
+            career:
+              isCommuteCancel && state.career
+                ? {
+                    ...state.career,
+                    activeDayMarker: state.clock.day,
+                    shiftChoiceForDay: 'skipped',
+                  }
+                : state.career,
+            feedbacks: isCommuteCancel
+              ? [
+                  ...state.feedbacks.slice(-3),
+                  {
+                    id: nextId('fb'),
+                    text: 'Commute cancelled — open Career Hub to go in anytime',
+                    tone: 'info',
+                    createdAt: Date.now(),
+                  },
+                ]
+              : state.feedbacks,
             sim: isFront
               ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
               : state.sim,
@@ -603,6 +1403,43 @@ export const useGameStore = create<GameStoreState>()(
           if (queue.length === 0) return state;
           const [front, ...rest] = queue;
 
+          // Commute arrival transitions Maya off-lot into her Rabbit-Hole work shift
+          if (front.kind === 'commute') {
+            if (!state.career) {
+              return {
+                actionQueue: [],
+                sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
+              };
+            }
+            const levelDef = getCareerLevel(state.career.careerId, state.career.level);
+            const { endTotalMinutes } = getShiftWindowForDay(levelDef, state.clock.day);
+            const shiftEnd = Math.max(endTotalMinutes, state.clock.totalMinutes + 60);
+
+            return {
+              actionQueue: [],
+              shiftPrompt: null,
+              pieMenu: null,
+              sim: {
+                ...state.sim,
+                awayAtWork: true,
+                pose: 'idle',
+                activeObjectId: null,
+                activeProp: null,
+              },
+              activeShift: {
+                careerId: state.career.careerId,
+                level: state.career.level,
+                day: state.clock.day,
+                startTotalMinutes: state.clock.totalMinutes,
+                endTotalMinutes: shiftEnd,
+                tone: 'normal',
+                chanceCardTriggered: false,
+                performanceGained: 0,
+                workedMinutes: 0,
+              },
+            };
+          }
+
           // Walk-only actions complete immediately upon arrival
           if (front.kind === 'walk') {
             const nextQueue = preparePathForFrontAction(
@@ -630,6 +1467,7 @@ export const useGameStore = create<GameStoreState>()(
 
             return {
               wardrobeOpen: true,
+              phoneOpen: false,
               pieMenu: null,
               lastLiveSpeed: state.speed === 0 ? state.lastLiveSpeed : state.speed,
               speed: 0,
@@ -711,72 +1549,492 @@ export const useGameStore = create<GameStoreState>()(
           const minuteOfDay = totalWhole % (24 * 60);
           const hour = Math.floor(minuteOfDay / 60);
           const minute = minuteOfDay % 60;
+          const nextClock: GameClock = { day, hour, minute, totalMinutes: newTotal };
 
-          let nextNeeds = decayNeeds(state.sim.needs, simMinutesDelta, state.sim.pose);
+          let nextNeeds =
+            state.sim.awayAtWork && state.activeShift
+              ? applyWorkShiftNeedTick(state.sim.needs, simMinutesDelta, state.activeShift.tone)
+              : decayNeeds(state.sim.needs, simMinutesDelta, state.sim.pose);
           let nextQueue = state.actionQueue;
           let nextSim = state.sim;
           let nextIdle = state.idleSimMinutes;
           let nextFunds = state.funds;
+          let nextContacts = state.contacts;
+          let nextSocialFeed = state.socialFeed;
+          let nextCareer = state.career;
+          let nextShiftPrompt = state.shiftPrompt;
+          let nextActiveShift = state.activeShift;
+          let nextChanceCard = state.activeChanceCard;
+          let nextPromotionSummary = state.promotionSummary;
+          let nextPhoneHasBadge = state.phoneHasBadge;
+          let nextSpeed = state.speed;
+          let nextLastLiveSpeed = state.lastLiveSpeed;
           const nextFeedbacks = [...state.feedbacks];
 
-          // Daily creative stipend at midnight on new days (Day 2+)
-          const prevDay = state.clock.day;
-          if (day > prevDay) {
-            nextFunds += 250;
+          const pushFeedback = (text: string, tone: FloatingFeedback['tone'] = 'info') => {
             nextFeedbacks.push({
               id: nextId('fb'),
-              text: 'Daily Stipend +§250',
-              tone: 'positive',
+              text,
+              tone,
               createdAt: Date.now(),
             });
+          };
+
+          const tryApplyPromotion = (careerSnapshot: SimCareerState): SimCareerState => {
+            const curLevelDef = getCareerLevel(careerSnapshot.careerId, careerSnapshot.level);
+            const nextLevelDef = getNextCareerLevel(careerSnapshot.careerId, careerSnapshot.level);
+
+            // Max-rank (Level 5) excellence bonus when performance & daily task are maxed
+            if (
+              !nextLevelDef &&
+              careerSnapshot.performance >= 100 &&
+              careerSnapshot.dailyTaskProgress >= curLevelDef.dailyTask.targetCount
+            ) {
+              const excellenceBonus = 150;
+              nextFunds += excellenceBonus;
+              pushFeedback(`Top-Rank Excellence Bonus! +§${excellenceBonus}`, 'positive');
+              return {
+                ...careerSnapshot,
+                performance: 65,
+                dailyTaskProgress: 0,
+                totalEarned: careerSnapshot.totalEarned + excellenceBonus,
+              };
+            }
+
+            if (!canPromote(careerSnapshot, curLevelDef) || !nextLevelDef) return careerSnapshot;
+
+            const careerDef = CAREERS_BY_ID[careerSnapshot.careerId];
+            const bonus = curLevelDef.promotionBonus;
+            nextFunds += bonus;
+
+            const promotedCareer: SimCareerState = {
+              ...careerSnapshot,
+              level: nextLevelDef.level,
+              performance: 15,
+              dailyTaskProgress: 0,
+              totalEarned: careerSnapshot.totalEarned + bonus,
+            };
+
+            nextPromotionSummary = {
+              careerName: careerDef.name,
+              oldTitle: curLevelDef.title,
+              newTitle: nextLevelDef.title,
+              newLevel: nextLevelDef.level,
+              oldHourlyPay: curLevelDef.hourlyPay,
+              newHourlyPay: nextLevelDef.hourlyPay,
+              bonus,
+              dailyTaskLabel: nextLevelDef.dailyTask.label,
+            };
+            nextLastLiveSpeed = nextSpeed === 0 ? nextLastLiveSpeed : nextSpeed;
+            nextSpeed = 0;
+
+            const promoPost = createSocialPost({
+              id: nextId('post'),
+              authorName: nextSim.name,
+              authorColor: nextSim.appearance.topColor,
+              text: `Promoted to ${nextLevelDef.title} (§${nextLevelDef.hourlyPay}/hr) in ${careerDef.name}! Celebration time!`,
+              clock: nextClock,
+              tag: 'career',
+              likes: 18 + nextLevelDef.level * 4,
+            });
+            nextSocialFeed = [promoPost, ...nextSocialFeed].slice(0, 18);
+            pushFeedback(`Promoted to ${nextLevelDef.title}! (+§${bonus})`, 'positive');
+            return promotedCareer;
+          };
+
+          // Midnight rollover (new day): reset daily shift state & check low-funds safety net
+          const prevDay = state.clock.day;
+          if (day > prevDay) {
+            if (!nextCareer && nextFunds < 100) {
+              nextFunds += 50;
+              pushFeedback('Safety Net Stipend +§50', 'positive');
+            }
+            if (nextCareer) {
+              nextCareer = {
+                ...nextCareer,
+                activeDayMarker: day,
+                shiftChoiceForDay: null,
+                wfhActive: false,
+                wfhTasks: [],
+                wfhPaidToday: false,
+              };
+            }
+            if (nextShiftPrompt && nextShiftPrompt.day < day) {
+              nextShiftPrompt = null;
+            }
           }
 
-          if (nextQueue.length > 0 && nextQueue[0].phase === 'performing') {
-            const [front, ...rest] = nextQueue;
-            const remaining = Math.max(0, front.durationSimMinutes - front.elapsedSimMinutes);
-            const appliedDt = Math.min(simMinutesDelta, remaining);
-            const fraction = front.durationSimMinutes > 0 ? appliedDt / front.durationSimMinutes : 1;
+          // 1. Active Rabbit-Hole Work Shift progression
+          if (nextSim.awayAtWork && nextActiveShift && nextCareer) {
+            const careerDef = CAREERS_BY_ID[nextCareer.careerId];
+            const levelDef = getCareerLevel(nextCareer.careerId, nextCareer.level);
+            const shiftDurationMins = Math.max(
+              60,
+              nextActiveShift.endTotalMinutes - nextActiveShift.startTotalMinutes,
+            );
+            const dailyTaskComplete =
+              nextCareer.dailyTaskProgress >= levelDef.dailyTask.targetCount;
+            const perfGain = computeShiftPerformanceDelta(
+              simMinutesDelta,
+              shiftDurationMins,
+              nextActiveShift.tone,
+              nextSim.emotion,
+              levelDef.idealEmotion,
+              dailyTaskComplete,
+            );
 
-            nextNeeds = applyNeedDeltas(nextNeeds, front.needDeltas, fraction);
-            const updatedElapsed = front.elapsedSimMinutes + simMinutesDelta;
+            const updatedPerf = Math.min(100, nextCareer.performance + perfGain);
+            const updatedWorked = nextActiveShift.workedMinutes + simMinutesDelta;
 
-            if (updatedElapsed >= front.durationSimMinutes) {
-              const boost = front.emotionBoost
-                ? { type: front.emotionBoost, expiresAtSimMinute: newTotal + 180 }
-                : nextSim.emotionBoost;
+            nextCareer = {
+              ...nextCareer,
+              performance: updatedPerf,
+            };
+            nextActiveShift = {
+              ...nextActiveShift,
+              performanceGained: nextActiveShift.performanceGained + perfGain,
+              workedMinutes: updatedWorked,
+            };
 
-              const preparedNext = preparePathForFrontAction(
-                rest,
-                nextSim,
-                state.placedObjects,
-                state.walls,
+            // Trigger one mid-shift Chance Card around 45% through shift
+            const midpoint =
+              nextActiveShift.startTotalMinutes + shiftDurationMins * 0.45;
+            if (
+              !nextActiveShift.chanceCardTriggered &&
+              !nextChanceCard &&
+              newTotal >= midpoint &&
+              newTotal < nextActiveShift.endTotalMinutes - 15
+            ) {
+              const card = pickChanceCardForCareer(
+                nextCareer.careerId,
+                day + nextCareer.shiftsCompleted + nextCareer.level,
               );
-              nextQueue = preparedNext;
+              nextActiveShift = {
+                ...nextActiveShift,
+                chanceCardTriggered: true,
+              };
+              nextChanceCard = {
+                card,
+                careerName: careerDef.name,
+              };
+              nextLastLiveSpeed = nextSpeed === 0 ? nextLastLiveSpeed : nextSpeed;
+              nextSpeed = 0;
+            }
+
+            // Complete shift when end time reached
+            if (newTotal >= nextActiveShift.endTotalMinutes) {
+              const pay = computeShiftPay(levelDef, updatedWorked);
+              nextFunds += pay;
+              pushFeedback(`Shift Complete! Earned +§${pay}`, 'positive');
+
+              nextCareer = {
+                ...nextCareer,
+                shiftChoiceForDay: 'completed',
+                shiftsCompleted: nextCareer.shiftsCompleted + 1,
+                totalEarned: nextCareer.totalEarned + pay,
+                ptoDays: Math.min(5, Number((nextCareer.ptoDays + 0.34).toFixed(2))),
+              };
+              nextCareer = tryApplyPromotion(nextCareer);
+              nextCareer = { ...nextCareer, dailyTaskProgress: 0 };
+
+              // Return Maya to the front sidewalk and walk her home
+              syncRuntimeToTile(COMMUTE_STREET_TILE.x, COMMUTE_STREET_TILE.z, Math.PI);
               nextSim = {
                 ...nextSim,
+                awayAtWork: false,
+                tileX: COMMUTE_STREET_TILE.x,
+                tileZ: COMMUTE_STREET_TILE.z,
                 pose: 'idle',
                 activeObjectId: null,
                 activeProp: null,
-                emotionBoost: boost,
               };
-            } else {
-              nextQueue = [{ ...front, elapsedSimMinutes: updatedElapsed }, ...rest];
+              nextActiveShift = null;
+              nextQueue = buildReturnHomeAction(state.placedObjects, state.walls);
             }
             nextIdle = 0;
-          } else if (nextQueue.length === 0) {
-            nextIdle += simMinutesDelta;
           } else {
-            nextIdle = 0;
+            // 2. Normal on-lot interaction progress
+            if (nextQueue.length > 0 && nextQueue[0].phase === 'performing') {
+              const [front, ...rest] = nextQueue;
+              const remaining = Math.max(0, front.durationSimMinutes - front.elapsedSimMinutes);
+              const appliedDt = Math.min(simMinutesDelta, remaining);
+              const fraction =
+                front.durationSimMinutes > 0 ? appliedDt / front.durationSimMinutes : 1;
+
+              nextNeeds = applyNeedDeltas(nextNeeds, front.needDeltas, fraction);
+              const updatedElapsed = front.elapsedSimMinutes + simMinutesDelta;
+
+              if (updatedElapsed >= front.durationSimMinutes) {
+                const boost = front.emotionBoost
+                  ? { type: front.emotionBoost, expiresAtSimMinute: newTotal + 180 }
+                  : nextSim.emotionBoost;
+
+                // Social Contact relationship gain & Social Bunny post
+                if (front.contactId && front.relationshipDelta) {
+                  const targetContact = nextContacts.find((c) => c.id === front.contactId);
+                  if (targetContact) {
+                    const updatedRel = clampRelationship(
+                      targetContact.relationship + front.relationshipDelta,
+                    );
+                    nextContacts = nextContacts.map((c) =>
+                      c.id === front.contactId
+                        ? { ...c, relationship: updatedRel, lastInteractedDay: day }
+                        : c,
+                    );
+                    pushFeedback(
+                      `+${front.relationshipDelta} Friendship with ${targetContact.name.split(' ')[0]}`,
+                      'positive',
+                    );
+                    if (front.socialPostText) {
+                      const post = createSocialPost({
+                        id: nextId('post'),
+                        authorName: nextSim.name,
+                        authorColor: nextSim.appearance.topColor,
+                        text: front.socialPostText,
+                        clock: nextClock,
+                        tag: 'friend',
+                      });
+                      nextSocialFeed = [post, ...nextSocialFeed].slice(0, 18);
+                    }
+                  }
+                }
+
+                // Zoomers Delivery completion toast & post
+                if (front.deliveryItemId) {
+                  const delItem = DELIVERY_ITEMS.find((d) => d.id === front.deliveryItemId);
+                  if (delItem) {
+                    pushFeedback(`Zoomers Delivered: ${delItem.name}!`, 'positive');
+                    const post = createSocialPost({
+                      id: nextId('post'),
+                      authorName: nextSim.name,
+                      authorColor: nextSim.appearance.topColor,
+                      text: delItem.postText,
+                      clock: nextClock,
+                      tag: 'lifestyle',
+                    });
+                    nextSocialFeed = [post, ...nextSocialFeed].slice(0, 18);
+                  }
+                }
+
+                // Career Daily Prep Task & Work From Home Task matching
+                if (nextCareer && front.interactionId) {
+                  const levelDef = getCareerLevel(nextCareer.careerId, nextCareer.level);
+                  const interactionId = front.interactionId;
+
+                  if (
+                    nextCareer.dailyTaskProgress < levelDef.dailyTask.targetCount &&
+                    levelDef.dailyTask.matchingInteractionIds.includes(interactionId)
+                  ) {
+                    const nextProgress = nextCareer.dailyTaskProgress + 1;
+                    nextCareer = {
+                      ...nextCareer,
+                      dailyTaskProgress: nextProgress,
+                      performance: Math.min(100, nextCareer.performance + 8),
+                    };
+                    if (nextProgress >= levelDef.dailyTask.targetCount) {
+                      pushFeedback(`Daily Career Task Complete!`, 'positive');
+                    } else {
+                      pushFeedback(
+                        `Daily Task: ${nextProgress}/${levelDef.dailyTask.targetCount}`,
+                        'info',
+                      );
+                    }
+                  }
+
+                  if (nextCareer.wfhActive && !nextCareer.wfhPaidToday) {
+                    let wfhProgressed = false;
+                    const updatedWfhTasks = nextCareer.wfhTasks.map((task) => {
+                      if (
+                        !wfhProgressed &&
+                        task.progress < task.targetCount &&
+                        task.matchingInteractionIds.includes(interactionId)
+                      ) {
+                        wfhProgressed = true;
+                        return { ...task, progress: task.progress + 1 };
+                      }
+                      return task;
+                    });
+
+                    if (wfhProgressed) {
+                      const allDone = updatedWfhTasks.every((t) => t.progress >= t.targetCount);
+                      nextCareer = {
+                        ...nextCareer,
+                        wfhTasks: updatedWfhTasks,
+                      };
+                      if (allDone) {
+                        const wfhPay = levelDef.hourlyPay * levelDef.shiftDurationHours;
+                        nextFunds += wfhPay;
+                        nextCareer = {
+                          ...nextCareer,
+                          wfhPaidToday: true,
+                          shiftsCompleted: nextCareer.shiftsCompleted + 1,
+                          totalEarned: nextCareer.totalEarned + wfhPay,
+                          performance: Math.min(100, nextCareer.performance + 34),
+                          ptoDays: Math.min(5, Number((nextCareer.ptoDays + 0.34).toFixed(2))),
+                        };
+                        pushFeedback(`WFH Complete! Earned +§${wfhPay}`, 'positive');
+                        const wfhPost = createSocialPost({
+                          id: nextId('post'),
+                          authorName: nextSim.name,
+                          authorColor: nextSim.appearance.topColor,
+                          text: `Crushed my Work From Home tasks today and earned §${wfhPay} from the couch!`,
+                          clock: nextClock,
+                          tag: 'career',
+                        });
+                        nextSocialFeed = [wfhPost, ...nextSocialFeed].slice(0, 18);
+                        nextCareer = tryApplyPromotion(nextCareer);
+                        nextCareer = { ...nextCareer, dailyTaskProgress: 0 };
+                      } else {
+                        const doneCount = updatedWfhTasks.filter(
+                          (t) => t.progress >= t.targetCount,
+                        ).length;
+                        pushFeedback(
+                          `WFH Task Done (${doneCount}/${updatedWfhTasks.length})`,
+                          'positive',
+                        );
+                      }
+                    }
+                  }
+                }
+
+                const preparedNext = preparePathForFrontAction(
+                  rest,
+                  nextSim,
+                  state.placedObjects,
+                  state.walls,
+                );
+                nextQueue = preparedNext;
+                nextSim = {
+                  ...nextSim,
+                  pose: 'idle',
+                  activeObjectId: null,
+                  activeProp: null,
+                  emotionBoost: boost,
+                };
+              } else {
+                nextQueue = [{ ...front, elapsedSimMinutes: updatedElapsed }, ...rest];
+              }
+              nextIdle = 0;
+            } else if (nextQueue.length === 0) {
+              nextIdle += simMinutesDelta;
+            } else {
+              nextIdle = 0;
+            }
+
+            // 3. Schedule Pre-Shift Prompt (60 min prior) & Auto-Commute at Shift Start
+            if (nextCareer && !nextActiveShift && !nextSim.awayAtWork) {
+              const careerDef = CAREERS_BY_ID[nextCareer.careerId];
+              const levelDef = getCareerLevel(nextCareer.careerId, nextCareer.level);
+              if (isWorkday(levelDef, day)) {
+                const { startTotalMinutes, endTotalMinutes } = getShiftWindowForDay(levelDef, day);
+
+                // Trigger pre-shift prompt 60 minutes before shift starts
+                if (
+                  nextCareer.promptShownForDay !== day &&
+                  nextCareer.shiftChoiceForDay === null &&
+                  newTotal >= startTotalMinutes - 60 &&
+                  newTotal < endTotalMinutes - 30
+                ) {
+                  nextShiftPrompt = {
+                    day,
+                    careerId: nextCareer.careerId,
+                    level: nextCareer.level,
+                    shiftStartHour: levelDef.shiftStartHour,
+                    shiftDurationHours: levelDef.shiftDurationHours,
+                  };
+                  nextCareer = {
+                    ...nextCareer,
+                    promptShownForDay: day,
+                  };
+                  nextPhoneHasBadge = true;
+                  pushFeedback(
+                    `${careerDef.name} shift starts at ${formatHour12(levelDef.shiftStartHour)}!`,
+                    'info',
+                  );
+                }
+
+                // Auto-commute once shift starts (with a 20 Sim-min grace window when shiftChoiceForDay is still undecided
+                // so newly hired 9:00 AM Sims or players reading the prompt have time to pick WFH or PTO)
+                const alreadyCommuting = nextQueue.some((a) => a.kind === 'commute');
+                const readyForAutoCommute =
+                  nextCareer.shiftChoiceForDay === 'rabbit_hole'
+                    ? newTotal >= startTotalMinutes
+                    : nextCareer.shiftChoiceForDay === null &&
+                      newTotal >= startTotalMinutes + 20;
+                if (
+                  !alreadyCommuting &&
+                  readyForAutoCommute &&
+                  newTotal < endTotalMinutes - 30
+                ) {
+                  const commute = buildCommuteAction(
+                    nextSim,
+                    state.placedObjects,
+                    state.walls,
+                    careerDef.name,
+                  );
+                  nextShiftPrompt = null;
+                  nextCareer = {
+                    ...nextCareer,
+                    activeDayMarker: day,
+                    shiftChoiceForDay: 'rabbit_hole',
+                    wfhActive: false,
+                  };
+
+                  if (commute) {
+                    nextQueue = [commute];
+                    nextSim = {
+                      ...nextSim,
+                      pose: 'walk',
+                      activeObjectId: null,
+                      activeProp: null,
+                    };
+                    pushFeedback(`Time for work! Heading to ${careerDef.name}`, 'info');
+                  } else {
+                    // Direct off-lot fallback if doorway is blocked
+                    nextQueue = [];
+                    nextSim = {
+                      ...nextSim,
+                      awayAtWork: true,
+                      pose: 'idle',
+                      activeObjectId: null,
+                      activeProp: null,
+                    };
+                    nextActiveShift = {
+                      careerId: nextCareer.careerId,
+                      level: nextCareer.level,
+                      day,
+                      startTotalMinutes: newTotal,
+                      endTotalMinutes: Math.max(endTotalMinutes, newTotal + 60),
+                      tone: 'normal',
+                      chanceCardTriggered: false,
+                      performanceGained: 0,
+                      workedMinutes: 0,
+                    };
+                    pushFeedback(`Started ${careerDef.name} shift!`, 'info');
+                  }
+                }
+              }
+            }
           }
 
           const nextEmotion = computeEmotion(nextNeeds, nextSim.emotionBoost, newTotal);
 
           return {
-            clock: { day, hour, minute, totalMinutes: newTotal },
+            clock: nextClock,
             funds: nextFunds,
+            speed: nextSpeed,
+            lastLiveSpeed: nextLastLiveSpeed,
             feedbacks: nextFeedbacks.slice(-4),
             actionQueue: nextQueue,
             idleSimMinutes: nextIdle,
+            contacts: nextContacts,
+            socialFeed: nextSocialFeed,
+            career: nextCareer,
+            shiftPrompt: nextShiftPrompt,
+            activeShift: nextActiveShift,
+            activeChanceCard: nextChanceCard,
+            promotionSummary: nextPromotionSummary,
+            phoneHasBadge: nextPhoneHasBadge,
             sim: {
               ...nextSim,
               needs: nextNeeds,
@@ -788,7 +2046,17 @@ export const useGameStore = create<GameStoreState>()(
 
       tryAutonomousDecision: () => {
         const state = get();
-        if (!state.freeWill || state.mode !== 'live' || state.wardrobeOpen || state.actionQueue.length > 0) return;
+        if (
+          !state.freeWill ||
+          state.mode !== 'live' ||
+          state.wardrobeOpen ||
+          state.sim.awayAtWork ||
+          state.activeChanceCard ||
+          state.promotionSummary ||
+          state.actionQueue.length > 0
+        ) {
+          return;
+        }
         if (state.idleSimMinutes < 6) return;
 
         const choice = pickAutonomousAction(
@@ -1085,6 +2353,17 @@ export const useGameStore = create<GameStoreState>()(
           mode: 'live',
           wallMode: 'cutaway',
           wardrobeOpen: false,
+          phoneOpen: false,
+          phoneApp: 'home',
+          phoneCaseId: 'coastal_mint',
+          phoneHasBadge: false,
+          contacts: createInitialContacts(),
+          socialFeed: createInitialSocialFeed(),
+          career: null,
+          shiftPrompt: null,
+          activeShift: null,
+          activeChanceCard: null,
+          promotionSummary: null,
           speed: 1,
           lastLiveSpeed: 1,
           freeWill: true,
@@ -1127,11 +2406,16 @@ export const useGameStore = create<GameStoreState>()(
         freeWill: state.freeWill,
         clock: state.clock,
         funds: state.funds,
+        phoneCaseId: state.phoneCaseId,
+        contacts: state.contacts,
+        socialFeed: state.socialFeed,
+        career: state.career,
         sim: {
           ...state.sim,
           pose: 'idle' as const,
           activeObjectId: null,
           activeProp: null,
+          awayAtWork: false,
         },
         placedObjects: state.placedObjects,
       }),
@@ -1139,6 +2423,18 @@ export const useGameStore = create<GameStoreState>()(
         if (!state) return;
         if (!state.graphicsQuality) {
           state.graphicsQuality = 'high';
+        }
+        if (!state.phoneCaseId) {
+          state.phoneCaseId = 'coastal_mint';
+        }
+        if (!Array.isArray(state.contacts) || state.contacts.length === 0) {
+          state.contacts = createInitialContacts();
+        }
+        if (!Array.isArray(state.socialFeed) || state.socialFeed.length === 0) {
+          state.socialFeed = createInitialSocialFeed();
+        }
+        if (state.career === undefined) {
+          state.career = null;
         }
         if (state.sim) {
           // Backfill new Phase 2 appearance fields for existing Phase 1 saves
@@ -1149,6 +2445,7 @@ export const useGameStore = create<GameStoreState>()(
             state.sim.appearance.eyeColor = '#4c382a';
           }
           state.sim.activeProp = null;
+          state.sim.awayAtWork = false;
 
           // Backfill Bedroom Dresser & Arch Mirror if missing and their tiles are unobstructed
           const hasDresser = state.placedObjects.some((o) => o.catalogId === 'oak_dresser');

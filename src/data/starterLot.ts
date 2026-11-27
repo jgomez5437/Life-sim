@@ -216,5 +216,6 @@ export function createInitialSim(): SimState {
     pose: 'idle',
     activeObjectId: null,
     activeProp: null,
+    awayAtWork: false,
   };
 }

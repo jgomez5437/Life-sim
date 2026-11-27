@@ -145,6 +145,7 @@ export function pickAutonomousAction(
   funds: number,
   targetNeed?: NeedKey,
 ): ScoredAutonomyCandidate | null {
+  if (sim.awayAtWork) return null;
   const candidates: ScoredAutonomyCandidate[] = [];
   const simTile = { x: sim.tileX, z: sim.tileZ };
 

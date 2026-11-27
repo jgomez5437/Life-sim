@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { CATALOG_BY_ID, SELF_INTERACTIONS } from '../data/catalog';
+import { PHONE_CASES_BY_ID } from '../data/phoneData';
 import { getObjectWorldCenter, rotateLocalVector } from '../engine/grid';
 import { simRuntime } from '../engine/simRuntime';
 import { getPlumbobColor } from '../engine/simulation';
@@ -157,7 +158,13 @@ function HairSculpt({
   );
 }
 
-function HeldPropMesh({ prop }: { prop: HeldPropType | null }) {
+function HeldPropMesh({
+  prop,
+  phoneCaseColor,
+}: {
+  prop: HeldPropType | null;
+  phoneCaseColor: string;
+}) {
   if (!prop) return null;
 
   switch (prop) {
@@ -166,7 +173,7 @@ function HeldPropMesh({ prop }: { prop: HeldPropType | null }) {
         <group position={[0, -0.05, 0.05]} rotation={[-0.5, -0.15, 0]}>
           <mesh castShadow>
             <boxGeometry args={[0.065, 0.115, 0.012]} />
-            <meshStandardMaterial color="#252c36" roughness={0.25} metalness={0.6} />
+            <meshStandardMaterial color={phoneCaseColor} roughness={0.28} metalness={0.35} />
           </mesh>
           <mesh position={[0, 0, 0.007]}>
             <planeGeometry args={[0.054, 0.098]} />
@@ -246,8 +253,10 @@ export function SimCharacter() {
   const sim = useGameStore((s) => s.sim);
   const mode = useGameStore((s) => s.mode);
   const wardrobeOpen = useGameStore((s) => s.wardrobeOpen);
+  const phoneCaseId = useGameStore((s) => s.phoneCaseId);
   const placedObjects = useGameStore((s) => s.placedObjects);
   const openPieMenu = useGameStore((s) => s.openPieMenu);
+  const phoneCaseColor = PHONE_CASES_BY_ID[phoneCaseId]?.meshColor ?? '#299c77';
 
   const rootRef = useRef<THREE.Group>(null);
   const pelvisRef = useRef<THREE.Group>(null);
@@ -493,7 +502,7 @@ export function SimCharacter() {
   });
 
   const handleSimTap = (e: ThreeEvent<MouseEvent>) => {
-    if (shouldIgnoreTap() || mode !== 'live' || wardrobeOpen) return;
+    if (shouldIgnoreTap() || mode !== 'live' || wardrobeOpen || sim.awayAtWork) return;
     e.stopPropagation();
 
     const worldPos = new THREE.Vector3(
@@ -513,7 +522,7 @@ export function SimCharacter() {
       screenY,
       worldPos: [worldPos.x, worldPos.y, worldPos.z],
       tile: { x: sim.tileX, z: sim.tileZ },
-      options: SELF_INTERACTIONS.map((inter) => ({
+      options: SELF_INTERACTIONS.slice(0, 3).map((inter) => ({
         id: `self:${inter.id}`,
         label: inter.label,
         icon: inter.icon,
@@ -529,7 +538,7 @@ export function SimCharacter() {
   const browY = isPositiveMood ? 0.056 : isNegativeMood ? 0.048 : 0.052;
 
   return (
-    <group ref={rootRef} onClick={handleSimTap}>
+    <group ref={rootRef} visible={!sim.awayAtWork} onClick={handleSimTap}>
       {/* Grounded contact shadow beneath Sim when standing/walking */}
       {sim.pose !== 'sleep' && sim.pose !== 'sit' && shadowTex && (
         <mesh position={[0, 0.012, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -689,7 +698,7 @@ export function SimCharacter() {
                   <sphereGeometry args={[0.039, 10, 10]} />
                   <meshStandardMaterial color={skinColor} roughness={0.66} />
                 </mesh>
-                <HeldPropMesh prop={sim.activeProp} />
+                <HeldPropMesh prop={sim.activeProp} phoneCaseColor={phoneCaseColor} />
               </group>
             </group>
           </group>

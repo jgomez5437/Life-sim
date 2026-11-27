@@ -73,6 +73,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             Radial Pie Menu. Tap any Need bar to auto-solve it!
           </li>
           <li>
+            <strong>Smartphone &amp; Careers:</strong> Tap the Phone button beside Maya’s portrait
+            to chat with friends on Social Bunny, apply for 5 careers, work from home, order
+            Zoomers delivery, or swap phone cases.
+          </li>
+          <li>
             <strong>Build &amp; Buy:</strong> Pick items from the bottom dock or tap existing
             furniture to move, rotate 90°, or sell for 80% Simoleons.
           </li>
