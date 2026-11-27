@@ -250,4 +250,65 @@ describe('smartphone, social, delivery, and job system store flows', () => {
     expect(useGameStore.getState().clock.day).toBe(3);
     expect(useGameStore.getState().funds).toBe(90);
   });
+
+  it('gives a 20-min grace window for 9:00 AM hires, stops re-commute when cancelled, and rewards max-rank excellence', () => {
+    // Joining Tech Guru (starts 9:00 AM) at 9:00 AM should NOT instantly yank Maya off-lot on tick 1
+    useGameStore.getState().joinCareer('tech_guru');
+    expect(useGameStore.getState().shiftPrompt).not.toBeNull();
+    useGameStore.getState().tickSimMinutes(5);
+    expect(useGameStore.getState().sim.awayAtWork).toBe(false);
+    expect(useGameStore.getState().actionQueue.length).toBe(0);
+
+    // Explicitly going to work then cancelling commute sets skipped and must NOT re-commute
+    expect(useGameStore.getState().goToWorkNow()).toBe(true);
+    const commuteId = useGameStore.getState().actionQueue[0].id;
+    useGameStore.getState().cancelAction(commuteId);
+    expect(useGameStore.getState().career?.shiftChoiceForDay).toBe('skipped');
+    useGameStore.getState().tickSimMinutes(30);
+    expect(useGameStore.getState().actionQueue.length).toBe(0);
+    expect(useGameStore.getState().sim.awayAtWork).toBe(false);
+
+    // Opening PieMenu closes open PhoneDrawer cleanly
+    useGameStore.getState().openPhone('career');
+    expect(useGameStore.getState().phoneOpen).toBe(true);
+    useGameStore.getState().openPieMenu({
+      kind: 'floor',
+      title: 'Ground',
+      screenX: 200,
+      screenY: 200,
+      worldPos: [0, 0, 0],
+      tile: { x: 6, z: 7 },
+      options: [{ id: 'walk_here', label: 'Walk Here', icon: 'footprints' }],
+    });
+    expect(useGameStore.getState().phoneOpen).toBe(false);
+
+    // Max-rank (Level 5) excellence bonus (+§150) & daily task reset after shift
+    useGameStore.setState((s) => ({
+      career: s.career
+        ? {
+            ...s.career,
+            level: 5,
+            performance: 95,
+            dailyTaskProgress: 2,
+            shiftChoiceForDay: null,
+          }
+        : null,
+      clock: { day: 2, hour: 11, minute: 0, totalMinutes: 1440 + 11 * 60 },
+    }));
+    expect(useGameStore.getState().goToWorkNow()).toBe(true);
+    useGameStore.getState().beginPerformingActiveAction();
+    useGameStore.getState().tickSimMinutes(150);
+    if (useGameStore.getState().activeChanceCard) {
+      useGameStore.getState().resolveChanceCard(0);
+      useGameStore.getState().dismissChanceCard();
+    }
+    const fundsBeforeFinish = useGameStore.getState().funds;
+    useGameStore.getState().tickSimMinutes(200);
+    const afterMaxShift = useGameStore.getState();
+    // Earns shift pay (5h * §105 = §525) + §150 max-rank excellence bonus
+    expect(afterMaxShift.funds).toBeGreaterThanOrEqual(fundsBeforeFinish + 525 + 150);
+    expect(afterMaxShift.career?.level).toBe(5);
+    expect(afterMaxShift.career?.dailyTaskProgress).toBe(0);
+    expect(afterMaxShift.career?.performance).toBe(65);
+  });
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Briefcase,
@@ -88,6 +88,15 @@ export function PhoneDrawer() {
   const [expandedContactId, setExpandedContactId] = useState<string | null>('npc_nora');
   const [browsingJobs, setBrowsingJobs] = useState(false);
   const [confirmQuit, setConfirmQuit] = useState(false);
+
+  useEffect(() => {
+    if (!phoneOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closePhone();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [phoneOpen, closePhone]);
 
   if (mode !== 'live' || !phoneOpen) return null;
 
@@ -448,7 +457,9 @@ export function PhoneDrawer() {
                       <div className="career-title-row">
                         <strong>{currentLevelDef.title}</strong>
                         <span className="career-lv-chip">
-                          Lv {career.level}/{currentCareerDef.levels.length}
+                          {career.level >= currentCareerDef.levels.length
+                            ? `Lv ${career.level} · Max`
+                            : `Lv ${career.level}/${currentCareerDef.levels.length}`}
                         </span>
                       </div>
                       <span className="career-sub-meta">

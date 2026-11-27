@@ -1110,7 +1110,7 @@ export const useGameStore = create<GameStoreState>()(
           };
         }),
 
-      openPieMenu: (target) => set({ pieMenu: target }),
+      openPieMenu: (target) => set({ pieMenu: target, phoneOpen: false }),
       closePieMenu: () => set({ pieMenu: null }),
 
       addFeedback: (text, tone = 'info') =>
@@ -1129,6 +1129,11 @@ export const useGameStore = create<GameStoreState>()(
         }),
 
       focusCameraOnSim: () => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is currently at work', 'info');
+          return;
+        }
         simRuntime.focusSimRequested = true;
       },
 
@@ -1337,13 +1342,34 @@ export const useGameStore = create<GameStoreState>()(
 
       cancelAction: (actionId) => {
         set((state) => {
+          const cancelled = state.actionQueue.find((a) => a.id === actionId);
           const isFront = state.actionQueue[0]?.id === actionId;
           const remaining = state.actionQueue.filter((a) => a.id !== actionId);
           const nextQueue = isFront
             ? preparePathForFrontAction(remaining, state.sim, state.placedObjects, state.walls)
             : remaining;
+          const isCommuteCancel = cancelled?.kind === 'commute';
           return {
             actionQueue: nextQueue,
+            career:
+              isCommuteCancel && state.career
+                ? {
+                    ...state.career,
+                    activeDayMarker: state.clock.day,
+                    shiftChoiceForDay: 'skipped',
+                  }
+                : state.career,
+            feedbacks: isCommuteCancel
+              ? [
+                  ...state.feedbacks.slice(-3),
+                  {
+                    id: nextId('fb'),
+                    text: 'Commute cancelled — open Career Hub to go in anytime',
+                    tone: 'info',
+                    createdAt: Date.now(),
+                  },
+                ]
+              : state.feedbacks,
             sim: isFront
               ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
               : state.sim,
@@ -1556,9 +1582,26 @@ export const useGameStore = create<GameStoreState>()(
 
           const tryApplyPromotion = (careerSnapshot: SimCareerState): SimCareerState => {
             const curLevelDef = getCareerLevel(careerSnapshot.careerId, careerSnapshot.level);
-            if (!canPromote(careerSnapshot, curLevelDef)) return careerSnapshot;
             const nextLevelDef = getNextCareerLevel(careerSnapshot.careerId, careerSnapshot.level);
-            if (!nextLevelDef) return careerSnapshot;
+
+            // Max-rank (Level 5) excellence bonus when performance & daily task are maxed
+            if (
+              !nextLevelDef &&
+              careerSnapshot.performance >= 100 &&
+              careerSnapshot.dailyTaskProgress >= curLevelDef.dailyTask.targetCount
+            ) {
+              const excellenceBonus = 150;
+              nextFunds += excellenceBonus;
+              pushFeedback(`Top-Rank Excellence Bonus! +§${excellenceBonus}`, 'positive');
+              return {
+                ...careerSnapshot,
+                performance: 65,
+                dailyTaskProgress: 0,
+                totalEarned: careerSnapshot.totalEarned + excellenceBonus,
+              };
+            }
+
+            if (!canPromote(careerSnapshot, curLevelDef) || !nextLevelDef) return careerSnapshot;
 
             const careerDef = CAREERS_BY_ID[careerSnapshot.careerId];
             const bonus = curLevelDef.promotionBonus;
@@ -1692,6 +1735,7 @@ export const useGameStore = create<GameStoreState>()(
                 ptoDays: Math.min(5, Number((nextCareer.ptoDays + 0.34).toFixed(2))),
               };
               nextCareer = tryApplyPromotion(nextCareer);
+              nextCareer = { ...nextCareer, dailyTaskProgress: 0 };
 
               // Return Maya to the front sidewalk and walk her home
               syncRuntimeToTile(COMMUTE_STREET_TILE.x, COMMUTE_STREET_TILE.z, Math.PI);
@@ -1839,6 +1883,7 @@ export const useGameStore = create<GameStoreState>()(
                         });
                         nextSocialFeed = [wfhPost, ...nextSocialFeed].slice(0, 18);
                         nextCareer = tryApplyPromotion(nextCareer);
+                        nextCareer = { ...nextCareer, dailyTaskProgress: 0 };
                       } else {
                         const doneCount = updatedWfhTasks.filter(
                           (t) => t.progress >= t.targetCount,
@@ -1908,13 +1953,17 @@ export const useGameStore = create<GameStoreState>()(
                   );
                 }
 
-                // Auto-commute once shift start hour hits (unless WFH / PTO / Sick already chosen)
+                // Auto-commute once shift starts (with a 20 Sim-min grace window when shiftChoiceForDay is still undecided
+                // so newly hired 9:00 AM Sims or players reading the prompt have time to pick WFH or PTO)
                 const alreadyCommuting = nextQueue.some((a) => a.kind === 'commute');
+                const readyForAutoCommute =
+                  nextCareer.shiftChoiceForDay === 'rabbit_hole'
+                    ? newTotal >= startTotalMinutes
+                    : nextCareer.shiftChoiceForDay === null &&
+                      newTotal >= startTotalMinutes + 20;
                 if (
                   !alreadyCommuting &&
-                  (nextCareer.shiftChoiceForDay === null ||
-                    nextCareer.shiftChoiceForDay === 'rabbit_hole') &&
-                  newTotal >= startTotalMinutes &&
+                  readyForAutoCommute &&
                   newTotal < endTotalMinutes - 30
                 ) {
                   const commute = buildCommuteAction(

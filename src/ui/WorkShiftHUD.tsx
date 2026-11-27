@@ -13,6 +13,7 @@ export function WorkShiftHUD() {
   const mode = useGameStore((s) => s.mode);
   const clock = useGameStore((s) => s.clock);
   const career = useGameStore((s) => s.career);
+  const phoneOpen = useGameStore((s) => s.phoneOpen);
   const shiftPrompt = useGameStore((s) => s.shiftPrompt);
   const activeShift = useGameStore((s) => s.activeShift);
   const activeChanceCard = useGameStore((s) => s.activeChanceCard);
@@ -53,7 +54,7 @@ export function WorkShiftHUD() {
   return (
     <>
       {/* 1. Pre-Shift Decision Banner (Sims 4 City Living / Freelancer choice) */}
-      {shiftPrompt && !activeShift && promptCareerDef && promptLevelDef && (
+      {shiftPrompt && !activeShift && !phoneOpen && promptCareerDef && promptLevelDef && (
         <div
           id="shift-prompt-banner"
           className="shift-prompt-banner glass-pill hud-interactive"

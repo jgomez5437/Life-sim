@@ -298,7 +298,7 @@ export type CareerTrackId = 'culinary' | 'tech_guru' | 'painter' | 'writer' | 'b
 
 export type WorkTone = 'normal' | 'work_hard' | 'take_easy' | 'socialize';
 
-export type ShiftDayChoice = 'rabbit_hole' | 'wfh' | 'pto' | 'sick' | 'completed';
+export type ShiftDayChoice = 'rabbit_hole' | 'wfh' | 'pto' | 'sick' | 'completed' | 'skipped';
 
 export interface CareerTaskRule {
   id: string;

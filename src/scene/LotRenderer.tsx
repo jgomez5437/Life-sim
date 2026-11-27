@@ -473,6 +473,12 @@ export function LotRenderer() {
       return;
     }
 
+    if (useGameStore.getState().sim.awayAtWork) {
+      closePieMenu();
+      useGameStore.getState().addFeedback('Maya is at work right now!', 'info');
+      return;
+    }
+
     const item = CATALOG_BY_ID[obj.catalogId];
     if (!item) return;
 
@@ -518,6 +524,12 @@ export function LotRenderer() {
       if (buildSelection) {
         updateBuildGhost(tile.x, tile.z);
       }
+      return;
+    }
+
+    if (useGameStore.getState().sim.awayAtWork) {
+      closePieMenu();
+      useGameStore.getState().addFeedback('Maya is at work right now!', 'info');
       return;
     }
 
