@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
@@ -26,6 +26,13 @@ export function SimCharacter() {
 
   const plumbobColor = getPlumbobColor(sim.needs, sim.emotion);
 
+  useLayoutEffect(() => {
+    if (rootRef.current) {
+      rootRef.current.position.set(simRuntime.worldX, 0.04, simRuntime.worldZ);
+      rootRef.current.rotation.y = simRuntime.facingAngle;
+    }
+  }, []);
+
   useFrame(({ clock }, delta) => {
     const t = clock.getElapsedTime();
     if (!rootRef.current || !bodyGroupRef.current) return;
@@ -35,8 +42,8 @@ export function SimCharacter() {
     let targetZ = simRuntime.worldZ;
     let targetRotY = simRuntime.facingAngle;
 
-    // Align Sim onto furniture when sitting or sleeping
-    if ((sim.pose === 'sit' || sim.pose === 'sleep') && sim.activeObjectId) {
+    // Align Sim onto furniture when sitting, sleeping, or stepping inside a shower stall
+    if ((sim.pose === 'sit' || sim.pose === 'sleep' || sim.pose === 'wash') && sim.activeObjectId) {
       const obj = placedObjects.find((o) => o.instanceId === sim.activeObjectId);
       const item = obj ? CATALOG_BY_ID[obj.catalogId] : null;
       if (obj && item?.poseOffset) {
@@ -89,7 +96,9 @@ export function SimCharacter() {
         0,
         smooth,
       );
-      const bob = simRuntime.isMoving ? Math.abs(Math.sin(simRuntime.walkCycle * 2)) * 0.045 : Math.sin(t * 2.2) * 0.012;
+      const bob = simRuntime.isMoving
+        ? Math.abs(Math.sin(simRuntime.walkCycle * 2)) * 0.045
+        : Math.sin(t * 2.2) * 0.012;
       bodyGroupRef.current.position.y = THREE.MathUtils.lerp(
         bodyGroupRef.current.position.y,
         bob,
@@ -127,7 +136,11 @@ export function SimCharacter() {
     if (shouldIgnoreTap() || mode !== 'live') return;
     e.stopPropagation();
 
-    const worldPos = new THREE.Vector3(simRuntime.worldX, 1.35, simRuntime.worldZ);
+    const worldPos = new THREE.Vector3(
+      rootRef.current ? rootRef.current.position.x : simRuntime.worldX,
+      1.35,
+      rootRef.current ? rootRef.current.position.z : simRuntime.worldZ,
+    );
     const projected = worldPos.clone().project(camera);
     const screenX = (projected.x * 0.5 + 0.5) * size.width;
     const screenY = (-projected.y * 0.5 + 0.5) * size.height;
@@ -150,7 +163,7 @@ export function SimCharacter() {
   };
 
   return (
-    <group ref={rootRef} position={[simRuntime.worldX, 0.04, simRuntime.worldZ]} onClick={handleSimTap}>
+    <group ref={rootRef} onClick={handleSimTap}>
       {/* Articulated character rig */}
       <group ref={bodyGroupRef}>
         {/* Left & Right Legs */}

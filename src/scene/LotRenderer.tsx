@@ -237,7 +237,7 @@ function PlacedFurnitureItem({
   isSelected: boolean;
   isActive: boolean;
   isHiddenForMove: boolean;
-  onSelectObject: (obj: PlacedObject, worldPos: THREE.Vector3) => void;
+  onSelectObject: (obj: PlacedObject, worldPos: THREE.Vector3, hitPoint: THREE.Vector3) => void;
 }) {
   const item = CATALOG_BY_ID[obj.catalogId];
   if (!item || isHiddenForMove) return null;
@@ -247,10 +247,10 @@ function PlacedFurnitureItem({
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     if (shouldIgnoreTap()) return;
-    // Allow clicking through walkable rugs to walk on them
+    // Allow clicking through walkable rugs to walk on them in Live mode
     if (item.walkable && useGameStore.getState().mode === 'live') return;
     e.stopPropagation();
-    onSelectObject(obj, new THREE.Vector3(center.x, 1.1, center.z));
+    onSelectObject(obj, new THREE.Vector3(center.x, 1.1, center.z), e.point);
   };
 
   return (
@@ -289,8 +289,19 @@ export function LotRenderer() {
 
   const isNight = hour >= 19 || hour < 6;
 
-  const handleObjectSelect = (obj: PlacedObject, worldPos: THREE.Vector3) => {
+  const handleObjectSelect = (
+    obj: PlacedObject,
+    worldPos: THREE.Vector3,
+    hitPoint: THREE.Vector3,
+  ) => {
     if (mode === 'build') {
+      if (buildSelection) {
+        const tile = worldToTile(hitPoint.x, hitPoint.z);
+        if (isInLotBounds(tile.x, tile.z)) {
+          updateBuildGhost(tile.x, tile.z);
+        }
+        return;
+      }
       startMoveObject(obj.instanceId);
       return;
     }

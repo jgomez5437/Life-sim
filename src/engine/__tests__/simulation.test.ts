@@ -84,4 +84,53 @@ describe('needs decay, emotion calculation, autonomy, and store economy', () => 
     const boosted = applyNeedDeltas(createInitialSim().needs, { hunger: 95 }, 1);
     expect(boosted.hunger).toBe(100);
   });
+
+  it('resets Sim pose and advances queue cleanly when selling or moving an object currently in use', () => {
+    const store = useGameStore.getState();
+    store.resetStarterLot();
+
+    // Queue sitting on sofa, then walking to patio
+    expect(useGameStore.getState().enqueueObjectInteraction('obj_sofa_1', 'relax_sofa')).toBe(true);
+    expect(useGameStore.getState().enqueueWalk({ x: 6, z: 12 })).toBe(true);
+
+    // Transition sofa interaction into active performing phase
+    useGameStore.getState().beginPerformingActiveAction();
+    expect(useGameStore.getState().sim.pose).toBe('sit');
+    expect(useGameStore.getState().sim.activeObjectId).toBe('obj_sofa_1');
+
+    // Enter Build Mode and sell the sofa while Maya is sitting on it
+    useGameStore.getState().setMode('build');
+    useGameStore.getState().startMoveObject('obj_sofa_1');
+    expect(useGameStore.getState().sellSelectedObject()).toBe(true);
+
+    const afterSell = useGameStore.getState();
+    expect(afterSell.sim.pose).toBe('idle');
+    expect(afterSell.sim.activeObjectId).toBeNull();
+    expect(afterSell.actionQueue.length).toBe(1);
+    expect(afterSell.actionQueue[0].kind).toBe('walk');
+    expect(afterSell.actionQueue[0].path.length).toBeGreaterThan(0);
+  });
+
+  it('re-validates queued paths when returning from Build Mode after placing an obstacle', () => {
+    const store = useGameStore.getState();
+    store.resetStarterLot();
+
+    // Queue walk to (6, 6), then chain a self interaction
+    expect(useGameStore.getState().enqueueWalk({ x: 6, z: 6 })).toBe(true);
+    expect(useGameStore.getState().enqueueSelfInteraction('call_friend')).toBe(true);
+    expect(useGameStore.getState().actionQueue[1].targetTile).toEqual({ x: 6, z: 6 });
+
+    // Enter Build Mode and place a potted plant right on (6, 6)
+    useGameStore.getState().setMode('build');
+    useGameStore.getState().startBuildItem('monstera_plant');
+    useGameStore.getState().updateBuildGhost(6, 6);
+    expect(useGameStore.getState().confirmBuildPlacement()).toBe(true);
+
+    // Return to Live Mode: unreachable walk to (6,6) should be dropped, advancing to call_friend
+    useGameStore.getState().setMode('live');
+    const state = useGameStore.getState();
+    expect(state.actionQueue.length).toBe(1);
+    expect(state.actionQueue[0].kind).toBe('self');
+    expect(state.actionQueue[0].interactionId).toBe('call_friend');
+  });
 });

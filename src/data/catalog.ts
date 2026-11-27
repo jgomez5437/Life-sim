@@ -39,7 +39,7 @@ export const CATALOG_ITEMS: CatalogItem[] = [
     price: 540,
     footprint: [2, 2],
     interactionOffset: [-1.45, 0.25],
-    poseOffset: [0, 0.42, 0.05],
+    poseOffset: [0, 0.42, 0.62],
     proceduralType: 'bed',
     primaryColor: '#56908c',
     secondaryColor: '#f5efe6',

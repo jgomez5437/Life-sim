@@ -1,8 +1,6 @@
+import { useEffect } from 'react';
 import { useGameStore } from '../store/gameStore';
 import { ActionIcon } from './ActionIcon';
-
-const EDGE_MARGIN_X = 165;
-const EDGE_MARGIN_Y = 98;
 
 export function PieMenu() {
   const pieMenu = useGameStore((s) => s.pieMenu);
@@ -11,13 +9,25 @@ export function PieMenu() {
   const enqueueObjectInteraction = useGameStore((s) => s.enqueueObjectInteraction);
   const enqueueSelfInteraction = useGameStore((s) => s.enqueueSelfInteraction);
 
+  useEffect(() => {
+    if (!pieMenu) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closePieMenu();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pieMenu, closePieMenu]);
+
   if (!pieMenu) return null;
 
   const vw = typeof window !== 'undefined' ? window.innerWidth : 844;
   const vh = typeof window !== 'undefined' ? window.innerHeight : 390;
 
-  const clampedX = Math.max(EDGE_MARGIN_X, Math.min(vw - EDGE_MARGIN_X, pieMenu.screenX));
-  const clampedY = Math.max(EDGE_MARGIN_Y, Math.min(vh - EDGE_MARGIN_Y, pieMenu.screenY));
+  const marginX = Math.min(165, vw * 0.42);
+  const marginY = Math.min(98, vh * 0.34);
+
+  const clampedX = Math.max(marginX, Math.min(vw - marginX, pieMenu.screenX));
+  const clampedY = Math.max(marginY, Math.min(vh - marginY, pieMenu.screenY));
 
   const count = pieMenu.options.length;
   const radiusX = count <= 2 ? 104 : 114;

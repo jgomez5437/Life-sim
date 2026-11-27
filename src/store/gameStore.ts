@@ -136,57 +136,63 @@ function preparePathForFrontAction(
   placedObjects: PlacedObject[],
   walls: WallSegment[],
 ): ActionQueueItem[] {
-  if (queue.length === 0) return queue;
-  const [front, ...rest] = queue;
-  if (front.phase === 'performing') return queue;
-
+  let remaining = queue;
   const simTile = { x: sim.tileX, z: sim.tileZ };
 
-  // Re-resolve interaction slot in case furniture was moved
-  let targetTile = front.targetTile;
-  let facingAngle = front.facingAngle;
+  while (remaining.length > 0) {
+    const [front, ...rest] = remaining;
+    if (front.phase === 'performing') return remaining;
 
-  if (front.kind === 'object' && front.targetObjectId) {
-    const obj = placedObjects.find((o) => o.instanceId === front.targetObjectId);
-    const item = obj ? CATALOG_BY_ID[obj.catalogId] : null;
-    if (!obj || !item) {
-      return rest;
+    if (front.kind === 'self') {
+      return [
+        {
+          ...front,
+          targetTile: simTile,
+          path: [],
+          pathIndex: 0,
+        },
+        ...rest,
+      ];
     }
-    const slot = getBestInteractionSlot(obj, item, placedObjects, walls, simTile);
-    if (!slot) {
-      return rest;
-    }
-    targetTile = slot.tile;
-    facingAngle = slot.facingAngle;
-  }
 
-  if (front.kind === 'self') {
+    let targetTile = front.targetTile;
+    let facingAngle = front.facingAngle;
+
+    if (front.kind === 'object' && front.targetObjectId) {
+      const obj = placedObjects.find((o) => o.instanceId === front.targetObjectId);
+      const item = obj ? CATALOG_BY_ID[obj.catalogId] : null;
+      if (!obj || !item) {
+        remaining = rest;
+        continue;
+      }
+      const slot = getBestInteractionSlot(obj, item, placedObjects, walls, simTile);
+      if (!slot) {
+        remaining = rest;
+        continue;
+      }
+      targetTile = slot.tile;
+      facingAngle = slot.facingAngle;
+    }
+
+    const path = findPath(simTile, targetTile, placedObjects, walls);
+    if (path === null) {
+      remaining = rest;
+      continue;
+    }
+
     return [
       {
         ...front,
-        targetTile: simTile,
-        path: [],
+        targetTile,
+        facingAngle,
+        path,
         pathIndex: 0,
       },
       ...rest,
     ];
   }
 
-  const path = findPath(simTile, targetTile, placedObjects, walls);
-  if (path === null) {
-    return rest;
-  }
-
-  return [
-    {
-      ...front,
-      targetTile,
-      facingAngle,
-      path,
-      pathIndex: 0,
-    },
-    ...rest,
-  ];
+  return [];
 }
 
 export const useGameStore = create<GameStoreState>()(
@@ -220,11 +226,26 @@ export const useGameStore = create<GameStoreState>()(
             buildSelection: null,
           });
         } else {
+          // Re-validate queued walking path in case new furniture now intersects the old route
+          const refreshedQueue = preparePathForFrontAction(
+            state.actionQueue,
+            state.sim,
+            state.placedObjects,
+            state.walls,
+          );
+          const frontWasCancelled =
+            state.actionQueue.length > 0 &&
+            (refreshedQueue.length === 0 || refreshedQueue[0].id !== state.actionQueue[0].id);
+
           set({
             mode: 'live',
             speed: state.lastLiveSpeed || 1,
             buildSelection: null,
             pieMenu: null,
+            actionQueue: refreshedQueue,
+            sim: frontWasCancelled
+              ? { ...state.sim, pose: 'idle', activeObjectId: null }
+              : state.sim,
           });
         }
       },
@@ -414,13 +435,18 @@ export const useGameStore = create<GameStoreState>()(
           return false;
         }
 
+        const plannedTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+
         const action: ActionQueueItem = {
           id: nextId('act'),
           kind: 'self',
           label: interaction.label,
           icon: interaction.icon,
           interactionId,
-          targetTile: { x: state.sim.tileX, z: state.sim.tileZ },
+          targetTile: plannedTile,
           durationSimMinutes: interaction.durationSimMinutes,
           elapsedSimMinutes: 0,
           cost,
@@ -864,12 +890,29 @@ export const useGameStore = create<GameStoreState>()(
         }
 
         // Move existing object
+        const movedObjects = state.placedObjects.map((o) =>
+          o.instanceId === sel.movingInstanceId
+            ? { ...o, tileX: sel.tileX, tileZ: sel.tileZ, rotation: sel.rotation }
+            : o,
+        );
+        const wasUsingMoved = state.sim.activeObjectId === sel.movingInstanceId;
+        const filteredQueue = wasUsingMoved
+          ? state.actionQueue.filter((a) => a.targetObjectId !== sel.movingInstanceId)
+          : state.actionQueue;
+        const nextSim = wasUsingMoved
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null }
+          : state.sim;
+        const nextQueue = preparePathForFrontAction(
+          filteredQueue,
+          nextSim,
+          movedObjects,
+          state.walls,
+        );
+
         set({
-          placedObjects: state.placedObjects.map((o) =>
-            o.instanceId === sel.movingInstanceId
-              ? { ...o, tileX: sel.tileX, tileZ: sel.tileZ, rotation: sel.rotation }
-              : o,
-          ),
+          placedObjects: movedObjects,
+          sim: nextSim,
+          actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
             ...state.feedbacks.slice(-3),
@@ -892,10 +935,28 @@ export const useGameStore = create<GameStoreState>()(
         if (!item) return false;
 
         const refund = Math.round(item.price * 0.8);
+        const remainingObjects = state.placedObjects.filter(
+          (o) => o.instanceId !== sel.movingInstanceId,
+        );
+        const wasUsingSold = state.sim.activeObjectId === sel.movingInstanceId;
+        const nextSim = wasUsingSold
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null }
+          : state.sim;
+        const remainingQueue = state.actionQueue.filter(
+          (a) => a.targetObjectId !== sel.movingInstanceId,
+        );
+        const nextQueue = preparePathForFrontAction(
+          remainingQueue,
+          nextSim,
+          remainingObjects,
+          state.walls,
+        );
+
         set({
           funds: state.funds + refund,
-          placedObjects: state.placedObjects.filter((o) => o.instanceId !== sel.movingInstanceId),
-          actionQueue: state.actionQueue.filter((a) => a.targetObjectId !== sel.movingInstanceId),
+          placedObjects: remainingObjects,
+          sim: nextSim,
+          actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
             ...state.feedbacks.slice(-3),
