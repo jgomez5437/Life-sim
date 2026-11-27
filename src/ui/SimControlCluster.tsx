@@ -1,4 +1,6 @@
-import { FastForward, Pause, Play } from 'lucide-react';
+import { Briefcase, FastForward, Pause, Play, Smartphone } from 'lucide-react';
+import { PHONE_CASES_BY_ID } from '../data/phoneData';
+import { getDayShortName } from '../engine/careers';
 import { EMOTION_META, formatSimTime } from '../engine/simulation';
 import { useGameStore } from '../store/gameStore';
 import type { SimSpeed } from '../types/game';
@@ -16,25 +18,57 @@ export function SimControlCluster() {
   const funds = useGameStore((s) => s.funds);
   const clock = useGameStore((s) => s.clock);
   const speed = useGameStore((s) => s.speed);
+  const phoneOpen = useGameStore((s) => s.phoneOpen);
+  const phoneCaseId = useGameStore((s) => s.phoneCaseId);
+  const phoneHasBadge = useGameStore((s) => s.phoneHasBadge);
+  const shiftPrompt = useGameStore((s) => s.shiftPrompt);
 
   const setSpeed = useGameStore((s) => s.setSpeed);
   const focusCameraOnSim = useGameStore((s) => s.focusCameraOnSim);
+  const togglePhone = useGameStore((s) => s.togglePhone);
 
   if (mode !== 'live') return null;
 
   const emotion = EMOTION_META[sim.emotion];
+  const phoneCase = PHONE_CASES_BY_ID[phoneCaseId] ?? PHONE_CASES_BY_ID.coastal_mint;
+  const showBadge = !phoneOpen && (phoneHasBadge || Boolean(shiftPrompt));
 
   return (
-    <section className="sim-cluster hud-interactive" aria-label="Sim portrait and time controls">
+    <section className="sim-cluster hud-interactive" aria-label="Sim portrait, phone, and time controls">
+      <button
+        id="btn-open-phone"
+        type="button"
+        className={`phone-dock-btn glass-pill ${phoneOpen ? 'active' : ''}`}
+        onClick={togglePhone}
+        title="Open Maya's Smartphone"
+        aria-label="Open Smartphone"
+        aria-expanded={phoneOpen}
+        style={{
+          borderColor: phoneOpen ? phoneCase.accentColor : undefined,
+        }}
+      >
+        <span
+          className="phone-dock-bezel"
+          style={{
+            background: phoneCase.frameColor,
+            boxShadow: `0 2px 8px ${phoneCase.frameColor}55`,
+          }}
+        >
+          <Smartphone size={17} color="#ffffff" />
+        </span>
+        <span className="phone-dock-label">Phone</span>
+        {showBadge && <span className="phone-badge-dot" aria-label="New notification" />}
+      </button>
+
       <button
         id="btn-focus-sim"
         type="button"
         className="sim-portrait-card glass-pill"
         onClick={focusCameraOnSim}
-        title="Center camera on Maya"
+        title={sim.awayAtWork ? 'Maya is currently at work' : 'Center camera on Maya'}
       >
         <div
-          className="sim-avatar"
+          className={`sim-avatar ${sim.awayAtWork ? 'away-at-work' : ''}`}
           style={{
             background: `linear-gradient(155deg, ${emotion.bgTint}, rgba(255,255,255,0.8))`,
             border: `2px solid ${emotion.color}`,
@@ -85,17 +119,26 @@ export function SimControlCluster() {
               strokeLinecap="round"
             />
           </svg>
+          {sim.awayAtWork && (
+            <span className="avatar-work-pill" title="At Work">
+              <Briefcase size={10} />
+            </span>
+          )}
         </div>
 
         <div className="sim-meta">
           <div className="sim-name-row">
             <span className="sim-name">{sim.name}</span>
-            <span
-              className="emotion-badge"
-              style={{ background: emotion.bgTint, color: emotion.color }}
-            >
-              {emotion.label}
-            </span>
+            {sim.awayAtWork ? (
+              <span className="emotion-badge work-status-badge">At Work</span>
+            ) : (
+              <span
+                className="emotion-badge"
+                style={{ background: emotion.bgTint, color: emotion.color }}
+              >
+                {emotion.label}
+              </span>
+            )}
           </div>
           <div className="sim-funds-row">
             <span className="funds-value">§{funds.toLocaleString()}</span>
@@ -105,7 +148,9 @@ export function SimControlCluster() {
 
       <div className="time-speed-card glass-pill">
         <div className="clock-row">
-          <span className="clock-day">Day {clock.day}</span>
+          <span className="clock-day">
+            Day {clock.day} · {getDayShortName(clock.day)}
+          </span>
           <span className="clock-time">{formatSimTime(clock.hour, clock.minute)}</span>
         </div>
         <div className="speed-row" role="group" aria-label="Simulation speed">

@@ -1,21 +1,31 @@
 import {
   Apple,
+  Award,
   BookOpen,
+  Briefcase,
+  Camera,
+  Code2,
   Coffee,
   Droplets,
   Flame,
   Footprints,
   Gamepad2,
   Leaf,
+  MessageCircle,
   Moon,
+  Music,
+  Palette,
   PenTool,
   Phone,
+  Pizza,
   Shirt,
   Smile,
   Sofa,
   Sparkles,
   Sun,
+  Truck,
   Tv,
+  Users,
   Utensils,
   Zap,
 } from 'lucide-react';
@@ -58,6 +68,26 @@ export function ActionIcon({ name, size = 15 }: { name: string; size?: number })
       return <Smile size={size} />;
     case 'leaf':
       return <Leaf size={size} />;
+    case 'briefcase':
+      return <Briefcase size={size} />;
+    case 'pizza':
+      return <Pizza size={size} />;
+    case 'music':
+      return <Music size={size} />;
+    case 'camera':
+      return <Camera size={size} />;
+    case 'message':
+      return <MessageCircle size={size} />;
+    case 'users':
+      return <Users size={size} />;
+    case 'truck':
+      return <Truck size={size} />;
+    case 'award':
+      return <Award size={size} />;
+    case 'code':
+      return <Code2 size={size} />;
+    case 'palette':
+      return <Palette size={size} />;
     case 'footprints':
     default:
       return <Footprints size={size} />;

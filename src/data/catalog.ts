@@ -30,6 +30,36 @@ export const SELF_INTERACTIONS: InteractionOption[] = [
     animationPose: 'stand_use',
     emotionBoost: 'energized',
   },
+  {
+    id: 'play_blicblock',
+    label: 'Play Blicblock Mobile',
+    icon: 'gamepad',
+    durationSimMinutes: 22,
+    needDeltas: { fun: 38, energy: -4 },
+    animationPose: 'phone',
+    emotionBoost: 'happy',
+    heldProp: 'phone',
+  },
+  {
+    id: 'stream_lofi',
+    label: 'Stream Lo-Fi Chill Mix',
+    icon: 'music',
+    durationSimMinutes: 18,
+    needDeltas: { fun: 26, energy: 10 },
+    animationPose: 'phone',
+    emotionBoost: 'inspired',
+    heldProp: 'phone',
+  },
+  {
+    id: 'take_selfie',
+    label: 'Take Glam Selfie',
+    icon: 'camera',
+    durationSimMinutes: 12,
+    needDeltas: { fun: 20, social: 14 },
+    animationPose: 'phone',
+    emotionBoost: 'inspired',
+    heldProp: 'phone',
+  },
 ];
 
 export const CATALOG_ITEMS: CatalogItem[] = [

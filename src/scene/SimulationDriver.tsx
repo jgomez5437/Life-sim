@@ -25,7 +25,12 @@ export function SimulationDriver() {
       state.pruneFeedbacks();
     }
 
-    if (state.mode !== 'live' || state.speed === 0) {
+    if (
+      state.mode !== 'live' ||
+      state.speed === 0 ||
+      state.activeChanceCard ||
+      state.promotionSummary
+    ) {
       simRuntime.isMoving = false;
       return;
     }
@@ -34,7 +39,7 @@ export function SimulationDriver() {
 
     // 1. Advance active Sim movement along A* waypoints at 60 FPS
     const front = state.actionQueue[0];
-    if (front && front.phase === 'routing') {
+    if (!state.sim.awayAtWork && front && front.phase === 'routing') {
       if (front.pathIndex >= front.path.length) {
         simRuntime.isMoving = false;
         state.beginPerformingActiveAction();
@@ -79,11 +84,13 @@ export function SimulationDriver() {
       useGameStore.getState().tickSimMinutes(chunk);
     }
 
-    // 3. Periodic Free Will autonomy check when idle
+    // 3. Periodic Free Will autonomy check when idle and on-lot
     autonomyTimer.current += dt;
     if (autonomyTimer.current >= 1.2) {
       autonomyTimer.current = 0;
-      useGameStore.getState().tryAutonomousDecision();
+      if (!useGameStore.getState().sim.awayAtWork) {
+        useGameStore.getState().tryAutonomousDecision();
+      }
     }
   });
 
