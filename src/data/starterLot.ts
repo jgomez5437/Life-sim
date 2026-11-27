@@ -162,6 +162,8 @@ export const STARTER_OBJECTS: PlacedObject[] = [
   // Bedroom
   { instanceId: 'obj_bed_1', catalogId: 'cozy_double_bed', tileX: 11, tileZ: 3, rotation: 0 },
   { instanceId: 'obj_lamp_bed', catalogId: 'floor_lamp', tileX: 10, tileZ: 3, rotation: 0 },
+  { instanceId: 'obj_mirror_1', catalogId: 'arch_mirror', tileX: 9, tileZ: 4, rotation: 90 },
+  { instanceId: 'obj_dresser_1', catalogId: 'oak_dresser', tileX: 10, tileZ: 7, rotation: 180 },
   { instanceId: 'obj_bookshelf_2', catalogId: 'oak_bookshelf', tileX: 12, tileZ: 6, rotation: 270 },
 
   // Bathroom
@@ -190,11 +192,13 @@ export function createInitialSim(): SimState {
     name: 'Maya Lin',
     traits: ['Creative', 'Foodie', 'Warmhearted'],
     appearance: {
-      skinColor: '#f1c6a8',
-      hairColor: '#2d2424',
-      topColor: '#2c9b7f',
+      hairStyle: 'bun',
+      skinColor: '#f0c4a6',
+      hairColor: '#2d2220',
+      eyeColor: '#4c382a',
+      topColor: '#2a9b7f',
       bottomColor: '#364d68',
-      shoeColor: '#f5f1e8',
+      shoeColor: '#f6f2ea',
     },
     tileX: 6,
     tileZ: 7,
@@ -211,5 +215,6 @@ export function createInitialSim(): SimState {
     emotionBoost: null,
     pose: 'idle',
     activeObjectId: null,
+    activeProp: null,
   };
 }

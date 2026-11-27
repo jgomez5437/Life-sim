@@ -1,8 +1,10 @@
-import { RotateCcw, X } from 'lucide-react';
+import { RotateCcw, Sparkles, X } from 'lucide-react';
 import { useGameStore } from '../store/gameStore';
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const resetStarterLot = useGameStore((s) => s.resetStarterLot);
+  const graphicsQuality = useGameStore((s) => s.graphicsQuality);
+  const setGraphicsQuality = useGameStore((s) => s.setGraphicsQuality);
 
   const handleReset = () => {
     resetStarterLot();
@@ -20,14 +22,45 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         <div className="modal-header">
           <h2 id="settings-modal-title" className="modal-title">
-            Controls &amp; Lot Menu
+            Controls &amp; Graphics
           </h2>
           <button type="button" className="queue-cancel-btn" onClick={onClose} aria-label="Close">
             <X size={15} />
           </button>
         </div>
 
+        <div className="settings-section">
+          <div className="settings-section-head">
+            <Sparkles size={14} />
+            <span>Graphics Quality</span>
+          </div>
+          <div className="quality-segment" role="group" aria-label="Graphics Quality">
+            <button
+              id="btn-quality-high"
+              type="button"
+              className={`quality-option ${graphicsQuality === 'high' ? 'active' : ''}`}
+              onClick={() => setGraphicsQuality('high')}
+            >
+              <span className="quality-name">High Fidelity</span>
+              <span className="quality-desc">2048px shadows, crisp DPR, drifting clouds</span>
+            </button>
+            <button
+              id="btn-quality-balanced"
+              type="button"
+              className={`quality-option ${graphicsQuality === 'balanced' ? 'active' : ''}`}
+              onClick={() => setGraphicsQuality('balanced')}
+            >
+              <span className="quality-name">Balanced Mobile</span>
+              <span className="quality-desc">1024px shadows, battery-friendly DPR</span>
+            </button>
+          </div>
+        </div>
+
         <ul className="guide-list">
+          <li>
+            <strong>Style Maya In-World:</strong> Tap the Bedroom Dresser, Brass Arch Mirror, or
+            Bathroom Vanity to open the 3D Wardrobe Studio and change hair, eyes &amp; outfits.
+          </li>
           <li>
             <strong>Pan Camera:</strong> Drag with 1 finger (or left-click drag on desktop).
           </li>
@@ -42,10 +75,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <li>
             <strong>Build &amp; Buy:</strong> Pick items from the bottom dock or tap existing
             furniture to move, rotate 90°, or sell for 80% Simoleons.
-          </li>
-          <li>
-            <strong>Auto-Save:</strong> Your home, funds, clock, and Maya&apos;s needs save
-            automatically on this device.
           </li>
         </ul>
 

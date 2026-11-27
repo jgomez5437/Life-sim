@@ -13,6 +13,10 @@ export type GameMode = 'live' | 'build';
 export type WallViewMode = 'cutaway' | 'down' | 'up';
 export type SimSpeed = 0 | 1 | 3 | 8;
 export type RotationDeg = 0 | 90 | 180 | 270;
+export type GraphicsQuality = 'high' | 'balanced';
+
+export type HairStyle = 'bun' | 'waves' | 'bob' | 'pixie';
+export type HeldPropType = 'phone' | 'mug' | 'plate' | 'book';
 
 export type CatalogCategory =
   | 'comfort'
@@ -33,6 +37,10 @@ export interface InteractionOption {
   needDeltas: Partial<Record<NeedKey, number>>;
   animationPose: Exclude<AnimationPose, 'idle' | 'walk'>;
   emotionBoost?: EmotionType;
+  /** Opens the in-world Wardrobe Studio upon arrival at a dresser or mirror. */
+  opensWardrobe?: boolean;
+  /** Optional 3D prop held in Maya's hand while performing this interaction. */
+  heldProp?: HeldPropType;
 }
 
 export interface CatalogItem {
@@ -44,7 +52,7 @@ export interface CatalogItem {
   footprint: [widthTiles: number, depthTiles: number];
   /** Local-space offset (in tiles, relative to object center) where the Sim prefers to stand/use when rotation === 0 (front = +Z). */
   interactionOffset: [dx: number, dz: number];
-  /** Optional local offset for seated/sleeping pose alignment relative to object center. */
+  /** Optional local offset for seated/sleeping/showering pose alignment relative to object center. */
   poseOffset?: [dx: number, dy: number, dz: number];
   walkable?: boolean;
   emitsLight?: boolean;
@@ -64,7 +72,9 @@ export interface CatalogItem {
     | 'bookshelf'
     | 'plant'
     | 'rug'
-    | 'floor_lamp';
+    | 'floor_lamp'
+    | 'dresser'
+    | 'mirror';
   primaryColor: string;
   secondaryColor: string;
   interactions: InteractionOption[];
@@ -119,6 +129,8 @@ export interface ActionQueueItem {
   needDeltas: Partial<Record<NeedKey, number>>;
   animationPose: AnimationPose;
   emotionBoost?: EmotionType;
+  opensWardrobe?: boolean;
+  heldProp?: HeldPropType;
   phase: 'routing' | 'performing';
   path: TileCoord[];
   pathIndex: number;
@@ -134,8 +146,10 @@ export interface SimNeeds {
 }
 
 export interface SimAppearance {
+  hairStyle: HairStyle;
   skinColor: string;
   hairColor: string;
+  eyeColor: string;
   topColor: string;
   bottomColor: string;
   shoeColor: string;
@@ -154,6 +168,7 @@ export interface SimState {
   emotionBoost: { type: EmotionType; expiresAtSimMinute: number } | null;
   pose: AnimationPose;
   activeObjectId: string | null;
+  activeProp: HeldPropType | null;
 }
 
 export interface GameClock {

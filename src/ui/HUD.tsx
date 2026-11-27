@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useGameStore } from '../store/gameStore';
 import { ActionQueue } from './ActionQueue';
 import { BuildBuyDock } from './BuildBuyDock';
 import { NeedsPanel } from './NeedsPanel';
@@ -7,20 +8,27 @@ import { PieMenu } from './PieMenu';
 import { SettingsModal } from './SettingsModal';
 import { SimControlCluster } from './SimControlCluster';
 import { TopBar } from './TopBar';
+import { WardrobePanel } from './WardrobePanel';
 
 export function HUD() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const wardrobeOpen = useGameStore((s) => s.wardrobeOpen);
 
   return (
     <div className="hud-layer">
-      <TopBar onOpenSettings={() => setSettingsOpen(true)} />
-      <ActionQueue />
-      <SimControlCluster />
-      <NeedsPanel />
-      <BuildBuyDock />
-      <PieMenu />
+      {!wardrobeOpen && (
+        <>
+          <TopBar onOpenSettings={() => setSettingsOpen(true)} />
+          <ActionQueue />
+          <SimControlCluster />
+          <NeedsPanel />
+          <BuildBuyDock />
+          <PieMenu />
+        </>
+      )}
+      <WardrobePanel />
       <OrientationGuard />
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && !wardrobeOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

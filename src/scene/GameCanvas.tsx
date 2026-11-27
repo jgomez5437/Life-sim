@@ -1,4 +1,6 @@
 import { Canvas } from '@react-three/fiber';
+import * as THREE from 'three';
+import { useGameStore } from '../store/gameStore';
 import { BuildGridOverlay } from './BuildGridOverlay';
 import { CameraRig } from './CameraRig';
 import { LightingSky } from './LightingSky';
@@ -7,13 +9,21 @@ import { SimCharacter } from './SimCharacter';
 import { SimulationDriver } from './SimulationDriver';
 
 export function GameCanvas() {
+  const graphicsQuality = useGameStore((s) => s.graphicsQuality);
+  const dpr: [number, number] = graphicsQuality === 'high' ? [1, 2] : [1, 1.35];
+
   return (
     <div className="canvas-viewport" id="game-canvas-container">
       <Canvas
         shadows
-        dpr={[1, 2]}
-        camera={{ fov: 40, near: 0.2, far: 120, position: [9, 10, 10] }}
-        gl={{ antialias: true, powerPreference: 'high-performance' }}
+        dpr={dpr}
+        camera={{ fov: 39, near: 0.2, far: 130, position: [9, 10, 10] }}
+        gl={{
+          antialias: true,
+          powerPreference: 'high-performance',
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 1.06,
+        }}
       >
         <LightingSky />
         <CameraRig />
