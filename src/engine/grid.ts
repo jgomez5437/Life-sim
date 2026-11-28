@@ -1,4 +1,10 @@
 import { CATALOG_BY_ID } from '../data/catalog';
+import {
+  WORLD_MAX_X,
+  WORLD_MAX_Z,
+  WORLD_MIN_X,
+  WORLD_MIN_Z,
+} from '../data/neighborhood';
 import { LOT_SIZE } from '../data/starterLot';
 import type { CatalogItem, PlacedObject, RotationDeg, TileCoord, WallSegment } from '../types/game';
 
@@ -18,8 +24,19 @@ export function worldToTile(worldX: number, worldZ: number): TileCoord {
   };
 }
 
+/** Strictly Maya's playable home Build & Buy lot (0..15 x 0..15). */
 export function isInLotBounds(tileX: number, tileZ: number): boolean {
   return tileX >= 0 && tileX < LOT_SIZE && tileZ >= 0 && tileZ < LOT_SIZE;
+}
+
+/** Full walkable Sunnyside neighborhood grid including sidewalks, park, and neighbor lots. */
+export function isInWorldBounds(tileX: number, tileZ: number): boolean {
+  return (
+    tileX >= WORLD_MIN_X &&
+    tileX <= WORLD_MAX_X &&
+    tileZ >= WORLD_MIN_Z &&
+    tileZ <= WORLD_MAX_Z
+  );
 }
 
 export function getEffectiveFootprint(
@@ -81,12 +98,16 @@ export interface WallLookup {
   verticalBlocked: Set<string>;
 }
 
-export function buildWallLookup(walls: WallSegment[]): WallLookup {
+export function buildWallLookup(
+  walls: WallSegment[],
+  lockedDoorWallIds?: Set<string>,
+): WallLookup {
   const horizontalBlocked = new Set<string>();
   const verticalBlocked = new Set<string>();
 
   for (const wall of walls) {
-    if (wall.kind === 'door') continue;
+    const isPassableDoor = wall.kind === 'door' && !(lockedDoorWallIds?.has(wall.id) ?? false);
+    if (isPassableDoor) continue;
     const key = `${wall.x},${wall.z}`;
     if (wall.orientation === 'horizontal') {
       horizontalBlocked.add(key);
@@ -229,6 +250,7 @@ export function getBestInteractionSlot(
   placedObjects: PlacedObject[],
   walls: WallSegment[],
   simTile: TileCoord,
+  lockedDoorWallIds?: Set<string>,
 ): InteractionSlotResult | null {
   const [effW, effD] = getEffectiveFootprint(item.footprint, obj.rotation);
   const centerTileX = obj.tileX + effW / 2;
@@ -243,12 +265,12 @@ export function getBestInteractionSlot(
   }
 
   const blocked = buildBlockedTileSet(placedObjects);
-  const wallLookup = buildWallLookup(walls);
+  const wallLookup = buildWallLookup(walls, lockedDoorWallIds);
   const occupied = getOccupiedTiles(obj.tileX, obj.tileZ, item.footprint, obj.rotation);
   const occupiedSet = new Set(occupied.map((t) => `${t.x},${t.z}`));
 
   const isValidSlot = (candidate: TileCoord): boolean => {
-    if (!isInLotBounds(candidate.x, candidate.z)) return false;
+    if (!isInWorldBounds(candidate.x, candidate.z)) return false;
     const key = `${candidate.x},${candidate.z}`;
     if (blocked.has(key)) return false;
 
@@ -311,4 +333,48 @@ export function getBestInteractionSlot(
   const slotWorld = tileToWorld(best.x, best.z);
   const facingAngle = Math.atan2(objWorld.x - slotWorld.x, objWorld.z - slotWorld.z);
   return { tile: best, facingAngle };
+}
+
+/**
+ * Finds the best unobstructed tile orthogonally adjacent to `targetTile` so Maya can stand face-to-face with an NPC.
+ */
+export function findAdjacentStandTile(
+  targetTile: TileCoord,
+  startTile: TileCoord,
+  allObjects: PlacedObject[],
+  allWalls: WallSegment[],
+  lockedDoorWallIds?: Set<string>,
+): InteractionSlotResult | null {
+  const blocked = buildBlockedTileSet(allObjects);
+  const wallLookup = buildWallLookup(allWalls, lockedDoorWallIds);
+  const targetWorld = tileToWorld(targetTile.x, targetTile.z);
+
+  const dirs: Array<[number, number]> = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+  const candidates: TileCoord[] = [];
+  for (const [dx, dz] of dirs) {
+    const nx = targetTile.x + dx;
+    const nz = targetTile.z + dz;
+    if (!isInWorldBounds(nx, nz)) continue;
+    if (blocked.has(`${nx},${nz}`)) continue;
+    if (isWallBetween(nx, nz, targetTile.x, targetTile.z, wallLookup)) continue;
+    candidates.push({ x: nx, z: nz });
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort(
+    (a, b) =>
+      Math.hypot(a.x - startTile.x, a.z - startTile.z) -
+      Math.hypot(b.x - startTile.x, b.z - startTile.z),
+  );
+  const best = candidates[0];
+  const slotWorld = tileToWorld(best.x, best.z);
+  return {
+    tile: best,
+    facingAngle: Math.atan2(targetWorld.x - slotWorld.x, targetWorld.z - slotWorld.z),
+  };
 }

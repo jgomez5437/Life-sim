@@ -2,7 +2,7 @@ import type { PlacedObject, TileCoord, WallSegment } from '../types/game';
 import {
   buildBlockedTileSet,
   buildWallLookup,
-  isInLotBounds,
+  isInWorldBounds,
   isWallBetween,
 } from './grid';
 
@@ -32,7 +32,7 @@ function octileHeuristic(ax: number, az: number, bx: number, bz: number): number
 }
 
 /**
- * 8-directional A* pathfinder across the 16x16 lot with wall-edge checks and corner-cut prevention.
+ * 8-directional A* pathfinder across the Sunnyside neighborhood with wall/locked-door checks and corner-cut prevention.
  * Returns the sequence of tiles to traverse (excluding `start`, including `goal`), or `null` if unreachable.
  */
 export function findPath(
@@ -40,8 +40,9 @@ export function findPath(
   goal: TileCoord,
   placedObjects: PlacedObject[],
   walls: WallSegment[],
+  lockedDoorWallIds?: Set<string>,
 ): TileCoord[] | null {
-  if (!isInLotBounds(start.x, start.z) || !isInLotBounds(goal.x, goal.z)) {
+  if (!isInWorldBounds(start.x, start.z) || !isInWorldBounds(goal.x, goal.z)) {
     return null;
   }
 
@@ -55,7 +56,7 @@ export function findPath(
     return null;
   }
 
-  const wallLookup = buildWallLookup(walls);
+  const wallLookup = buildWallLookup(walls, lockedDoorWallIds);
   const startKey = `${start.x},${start.z}`;
 
   const openList: PathNode[] = [
@@ -98,7 +99,7 @@ export function findPath(
     for (const [dx, dz, stepCost] of DIRECTIONS) {
       const nx = current.x + dx;
       const nz = current.z + dz;
-      if (!isInLotBounds(nx, nz)) continue;
+      if (!isInWorldBounds(nx, nz)) continue;
 
       const neighborKey = `${nx},${nz}`;
       if (closed.has(neighborKey) || blocked.has(neighborKey)) continue;

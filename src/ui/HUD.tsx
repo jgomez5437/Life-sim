@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useGameStore } from '../store/gameStore';
 import { ActionQueue } from './ActionQueue';
 import { BuildBuyDock } from './BuildBuyDock';
+import { DoorbellBanner } from './DoorbellBanner';
 import { NeedsPanel } from './NeedsPanel';
 import { OrientationGuard } from './OrientationGuard';
 import { PhoneDrawer } from './PhoneDrawer';
@@ -22,6 +23,7 @@ export function HUD() {
         <>
           <TopBar onOpenSettings={() => setSettingsOpen(true)} />
           <ActionQueue />
+          <DoorbellBanner />
           <WorkShiftHUD />
           <PhoneDrawer />
           <SimControlCluster />
