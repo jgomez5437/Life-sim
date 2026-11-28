@@ -144,10 +144,18 @@ export function pickAutonomousAction(
   walls: WallSegment[],
   funds: number,
   targetNeed?: NeedKey,
+  worldContext?: {
+    allObjects: PlacedObject[];
+    allWalls: WallSegment[];
+    lockedDoorWallIds?: Set<string>;
+  },
 ): ScoredAutonomyCandidate | null {
   if (sim.awayAtWork) return null;
   const candidates: ScoredAutonomyCandidate[] = [];
   const simTile = { x: sim.tileX, z: sim.tileZ };
+  const navObjects = worldContext?.allObjects ?? placedObjects;
+  const navWalls = worldContext?.allWalls ?? walls;
+  const lockedDoors = worldContext?.lockedDoorWallIds;
 
   const scoreNeedDeltas = (
     deltas: Partial<Record<NeedKey, number>>,
@@ -177,7 +185,7 @@ export function pickAutonomousAction(
     const item = CATALOG_BY_ID[obj.catalogId];
     if (!item || item.interactions.length === 0) continue;
 
-    const slot = getBestInteractionSlot(obj, item, placedObjects, walls, simTile);
+    const slot = getBestInteractionSlot(obj, item, navObjects, navWalls, simTile, lockedDoors);
     if (!slot) continue;
 
     // Quick distance estimate first; verify reachability before keeping best candidates
@@ -228,9 +236,9 @@ export function pickAutonomousAction(
     if (!obj) continue;
     const item = CATALOG_BY_ID[obj.catalogId];
     if (!item) continue;
-    const slot = getBestInteractionSlot(obj, item, placedObjects, walls, simTile);
+    const slot = getBestInteractionSlot(obj, item, navObjects, navWalls, simTile, lockedDoors);
     if (!slot) continue;
-    const path = findPath(simTile, slot.tile, placedObjects, walls);
+    const path = findPath(simTile, slot.tile, navObjects, navWalls, lockedDoors);
     if (path !== null) {
       return candidate;
     }

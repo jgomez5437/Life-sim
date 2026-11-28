@@ -222,9 +222,11 @@ describe('knocking, guest etiquette, face-to-face socializing, and doorbell visi
     const beforeFeedCount = useGameStore.getState().socialFeed.length;
 
     expect(useGameStore.getState().enqueueNpcInteraction('npc_nora', 'f2f_flirt')).toBe(true);
-    expect(useGameStore.getState().actionQueue[0].kind).toBe('social_npc');
+    const flirtAction = useGameStore.getState().actionQueue[0];
+    expect(flirtAction.kind).toBe('social_npc');
 
-    // Begin face-to-face flirt -> both Sims show heart bubbles and talkingWithMaya is active
+    // Simulate Maya walking right up to Nora's adjacent tile, then begin face-to-face flirt
+    useGameStore.getState().updateSimTile(flirtAction.targetTile, 0, flirtAction.path.length);
     useGameStore.getState().beginPerformingActiveAction();
     const mid = useGameStore.getState();
     expect(mid.sim.pose).toBe('talk');
@@ -278,5 +280,64 @@ describe('knocking, guest etiquette, face-to-face socializing, and doorbell visi
     camille = useGameStore.getState().npcs.find((n) => n.contactId === 'npc_camille')!;
     expect(camille.visitingMaya).toBe(false);
     expect(camille.pendingGoal).toBe('return_home');
+  });
+
+  it('handles cross-system interactions cleanly: neighbor commute, need auto-solve, Build Mode NPC release, and away-at-work arrivals', () => {
+    // 1. Place Maya inside unlocked Sagewood Cottage -> goToWorkNow & enqueueBestForNeed route cleanly out the door
+    const sagewood = NEIGHBOR_HOUSES_BY_ID.sagewood_cottage;
+    useGameStore.setState((s) => ({
+      unlockedHouseIds: ['sagewood_cottage'],
+      sim: { ...s.sim, tileX: sagewood.greetTile.x, tileZ: sagewood.greetTile.z },
+    }));
+
+    expect(useGameStore.getState().enqueueBestForNeed('hunger')).toBe(true);
+    expect(useGameStore.getState().actionQueue[0].path.length).toBeGreaterThan(0);
+
+    // Join Culinary (10:00 AM shift; clock starts at 9:00 AM -> within 60-min window) and commute from Sagewood
+    useGameStore.getState().joinCareer('culinary');
+    expect(useGameStore.getState().goToWorkNow()).toBe(true);
+    expect(useGameStore.getState().actionQueue[0].kind).toBe('commute');
+    expect(useGameStore.getState().actionQueue[0].path.length).toBeGreaterThan(0);
+
+    // 2. If Maya goes to work and an invited visitor arrives at her door, visitor politely heads home (never freezes)
+    useGameStore.getState().beginPerformingActiveAction();
+    expect(useGameStore.getState().sim.awayAtWork).toBe(true);
+
+    useGameStore.setState((s) => ({
+      npcs: s.npcs.map((n) =>
+        n.contactId === 'npc_camille'
+          ? {
+              ...n,
+              tileX: MAYA_FRONT_DOOR_OUTSIDE.x,
+              tileZ: MAYA_FRONT_DOOR_OUTSIDE.z,
+              pendingGoal: 'visit_maya_door',
+            }
+          : n,
+      ),
+    }));
+    useGameStore.getState().finishNpcRoute('npc_camille');
+    expect(useGameStore.getState().doorbellPrompt).toBeNull();
+    const camilleAfter = useGameStore.getState().npcs.find((n) => n.contactId === 'npc_camille')!;
+    expect(camilleAfter.knockingAtMayaDoor).toBe(false);
+    expect(camilleAfter.pendingGoal).toBe('return_home');
+
+    // 3. Selling a sofa that a visiting NPC is sitting on cleanly releases the NPC
+    useGameStore.getState().resetStarterLot();
+    const homeSofa = useGameStore
+      .getState()
+      .placedObjects.find((o) => o.catalogId === 'plush_sofa')!;
+    useGameStore.setState((s) => ({
+      npcs: s.npcs.map((n) =>
+        n.contactId === 'npc_leo'
+          ? { ...n, visitingMaya: true, pose: 'sit', activeObjectId: homeSofa.instanceId }
+          : n,
+      ),
+    }));
+    useGameStore.getState().setMode('build');
+    useGameStore.getState().startMoveObject(homeSofa.instanceId);
+    expect(useGameStore.getState().sellSelectedObject()).toBe(true);
+    const leoAfterSell = useGameStore.getState().npcs.find((n) => n.contactId === 'npc_leo')!;
+    expect(leoAfterSell.pose).toBe('idle');
+    expect(leoAfterSell.activeObjectId).toBeNull();
   });
 });

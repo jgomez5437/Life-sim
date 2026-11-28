@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import type { ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
@@ -281,6 +281,12 @@ function NeighborHouseRoof({
     geom.computeVertexNormals();
     return geom;
   }, [w, d]);
+
+  useEffect(() => {
+    return () => {
+      gableGeometry.dispose();
+    };
+  }, [gableGeometry]);
 
   const halfRun = d / 2 + overhang;
   const slopeLen = Math.hypot(halfRun, roofHeight);

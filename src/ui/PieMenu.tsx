@@ -85,6 +85,7 @@ export function PieMenu() {
       >
         <div className="pie-hub">
           <div className="pie-hub-title">{pieMenu.title}</div>
+          {pieMenu.subtitle && <div className="pie-hub-sub">{pieMenu.subtitle}</div>}
         </div>
 
         {pieMenu.options.map((opt, idx) => {

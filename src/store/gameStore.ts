@@ -44,6 +44,7 @@ import {
 import {
   findAdjacentStandTile,
   getBestInteractionSlot,
+  getOccupiedTiles,
   isInWorldBounds,
   isPlacementValid,
   tileToWorld,
@@ -391,8 +392,15 @@ function buildCommuteAction(
 function buildReturnHomeAction(
   placedObjects: PlacedObject[],
   walls: WallSegment[],
+  unlockedHouseIds: NeighborHouseId[] = [],
 ): ActionQueueItem[] {
-  const path = findPath(COMMUTE_STREET_TILE, RETURN_HOME_TILE, placedObjects, walls);
+  const path = findPath(
+    COMMUTE_STREET_TILE,
+    RETURN_HOME_TILE,
+    getAllWorldObjects(placedObjects),
+    getAllWorldWalls(walls),
+    getLockedDoorWallIdsForMaya(unlockedHouseIds),
+  );
   if (!path || path.length === 0) return [];
   return [
     {
@@ -412,6 +420,42 @@ function buildReturnHomeAction(
       pathIndex: 0,
     },
   ];
+}
+
+function sendNpcBackHomeState(
+  npc: NpcWorldState,
+  allObjects: PlacedObject[],
+  allWalls: WallSegment[],
+  waveUntilSimMinute?: number,
+): NpcWorldState {
+  const house = NEIGHBOR_HOUSES_BY_ID[npc.homeHouseId];
+  const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
+  const path =
+    (house &&
+      findPath(
+        { x: npc.tileX, z: npc.tileZ },
+        house.greetTile,
+        allObjects,
+        allWalls,
+        lockedForNpc,
+      )) ||
+    [];
+  return {
+    ...npc,
+    visitingMaya: false,
+    knockingAtMayaDoor: false,
+    talkingWithMaya: false,
+    activeObjectId: null,
+    activeProp: null,
+    pose: path.length > 0 ? 'walk' : 'idle',
+    path,
+    pathIndex: 0,
+    pendingGoal: 'return_home',
+    pendingObjectId: null,
+    speechBubble: waveUntilSimMinute
+      ? { icon: 'wave', expiresAtSimMinute: waveUntilSimMinute }
+      : null,
+  };
 }
 
 const SEED_CONTACTS = createInitialContacts();
@@ -902,7 +946,20 @@ export const useGameStore = create<GameStoreState>()(
           const updatedNpcs = state.npcs.map((n) => {
             if (n.contactId !== contactId) return n;
             if (n.pendingGoal === 'visit_maya_door') {
-              if (contact && !state.sim.awayAtWork) {
+              if (state.sim.awayAtWork) {
+                if (contact) {
+                  nextFeedbacks.push({
+                    id: nextId('fb'),
+                    text: `${contact.name.split(' ')[0]} stopped by while Maya was at work`,
+                    tone: 'info',
+                    createdAt: Date.now(),
+                  });
+                }
+                const allObjects = getAllWorldObjects(state.placedObjects);
+                const allWalls = getAllWorldWalls(state.walls);
+                return sendNpcBackHomeState(n, allObjects, allWalls, state.clock.totalMinutes + 12);
+              }
+              if (contact) {
                 nextDoorbell = {
                   contactId,
                   message: `${contact.name} is at your front door!`,
@@ -1458,6 +1515,7 @@ export const useGameStore = create<GameStoreState>()(
           state.placedObjects,
           state.walls,
           careerDef.name,
+          state.unlockedHouseIds,
         );
 
         if (commute) {
@@ -1491,8 +1549,17 @@ export const useGameStore = create<GameStoreState>()(
           endTotalMinutes,
           state.clock.totalMinutes + 60,
         );
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const nextNpcs = state.npcs.some((n) => n.knockingAtMayaDoor)
+          ? state.npcs.map((n) =>
+              n.knockingAtMayaDoor ? sendNpcBackHomeState(n, allObjects, allWalls) : n,
+            )
+          : state.npcs;
         set({
           shiftPrompt: null,
+          doorbellPrompt: null,
+          npcs: nextNpcs,
           phoneOpen: false,
           pieMenu: null,
           actionQueue: [],
@@ -2014,6 +2081,11 @@ export const useGameStore = create<GameStoreState>()(
           state.walls,
           state.funds,
           needKey,
+          {
+            allObjects: getAllWorldObjects(state.placedObjects),
+            allWalls: getAllWorldWalls(state.walls),
+            lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+          },
         );
         if (!choice) {
           state.addFeedback(`No available way to restore ${needKey}`, 'negative');
@@ -2121,10 +2193,19 @@ export const useGameStore = create<GameStoreState>()(
             const levelDef = getCareerLevel(state.career.careerId, state.career.level);
             const { endTotalMinutes } = getShiftWindowForDay(levelDef, state.clock.day);
             const shiftEnd = Math.max(endTotalMinutes, state.clock.totalMinutes + 60);
+            const allObjects = getAllWorldObjects(state.placedObjects);
+            const allWalls = getAllWorldWalls(state.walls);
+            const nextNpcs = state.npcs.some((n) => n.knockingAtMayaDoor)
+              ? state.npcs.map((n) =>
+                  n.knockingAtMayaDoor ? sendNpcBackHomeState(n, allObjects, allWalls) : n,
+                )
+              : state.npcs;
 
             return {
               actionQueue: [],
               shiftPrompt: null,
+              doorbellPrompt: null,
+              npcs: nextNpcs,
               pieMenu: null,
               sim: {
                 ...state.sim,
@@ -2244,6 +2325,60 @@ export const useGameStore = create<GameStoreState>()(
           if (front.kind === 'social_npc' && front.targetNpcId) {
             const targetNpc = state.npcs.find((n) => n.contactId === front.targetNpcId);
             if (targetNpc) {
+              const tileDist = Math.hypot(
+                targetNpc.tileX - state.sim.tileX,
+                targetNpc.tileZ - state.sim.tileZ,
+              );
+              // If the strolling NPC moved far away while Maya walked over, pause them and walk right up!
+              if (tileDist > 2.6) {
+                const allObjects = getAllWorldObjects(state.placedObjects);
+                const allWalls = getAllWorldWalls(state.walls);
+                const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+                const stand = findAdjacentStandTile(
+                  { x: targetNpc.tileX, z: targetNpc.tileZ },
+                  { x: state.sim.tileX, z: state.sim.tileZ },
+                  allObjects,
+                  allWalls,
+                  lockedDoors,
+                );
+                const catchUpPath = stand
+                  ? findPath(
+                      { x: state.sim.tileX, z: state.sim.tileZ },
+                      stand.tile,
+                      allObjects,
+                      allWalls,
+                      lockedDoors,
+                    )
+                  : null;
+                if (stand && catchUpPath && catchUpPath.length > 0) {
+                  return {
+                    npcs: state.npcs.map((n) =>
+                      n.contactId === targetNpc.contactId
+                        ? {
+                            ...n,
+                            path: [],
+                            pathIndex: 0,
+                            pose: 'idle' as const,
+                            pendingGoal: 'idle' as const,
+                            busyUntilSimMinute: state.clock.totalMinutes + 18,
+                          }
+                        : n,
+                    ),
+                    actionQueue: [
+                      {
+                        ...front,
+                        targetTile: stand.tile,
+                        facingAngle: stand.facingAngle,
+                        phase: 'routing',
+                        path: catchUpPath,
+                        pathIndex: 0,
+                      },
+                      ...rest,
+                    ],
+                  };
+                }
+              }
+
               const mayaWorld = tileToWorld(state.sim.tileX, state.sim.tileZ);
               const npcWorld = tileToWorld(targetNpc.tileX, targetNpc.tileZ);
               facingAngle = Math.atan2(npcWorld.x - mayaWorld.x, npcWorld.z - mayaWorld.z);
@@ -2326,6 +2461,7 @@ export const useGameStore = create<GameStoreState>()(
           let nextSocialFeed = state.socialFeed;
           let nextUnlockedHouseIds = state.unlockedHouseIds;
           let nextNpcs = state.npcs;
+          let nextDoorbellPrompt = state.doorbellPrompt;
           let nextCareer = state.career;
           let nextShiftPrompt = state.shiftPrompt;
           let nextActiveShift = state.activeShift;
@@ -2432,6 +2568,22 @@ export const useGameStore = create<GameStoreState>()(
               z: nextSim.tileZ,
             });
             nextUnlockedHouseIds = mayaCurrentHouse ? [mayaCurrentHouse.id] : [];
+
+            // Politely send home any late-night visitors at midnight
+            const hasLateVisitor = nextNpcs.some(
+              (n) => (n.visitingMaya || n.knockingAtMayaDoor) && !n.talkingWithMaya,
+            );
+            if (hasLateVisitor) {
+              const allObjects = getAllWorldObjects(state.placedObjects);
+              const allWalls = getAllWorldWalls(state.walls);
+              nextNpcs = nextNpcs.map((n) =>
+                (n.visitingMaya || n.knockingAtMayaDoor) && !n.talkingWithMaya
+                  ? sendNpcBackHomeState(n, allObjects, allWalls, newTotal + 12)
+                  : n,
+              );
+              nextDoorbellPrompt = null;
+              pushFeedback('Visitors headed home for the night', 'info');
+            }
           }
 
           // 1. Active Rabbit-Hole Work Shift progression
@@ -2856,6 +3008,16 @@ export const useGameStore = create<GameStoreState>()(
                     pushFeedback(`Time for work! Heading to ${careerDef.name}`, 'info');
                   } else {
                     // Direct off-lot fallback if doorway is blocked
+                    const allObjects = getAllWorldObjects(state.placedObjects);
+                    const allWalls = getAllWorldWalls(state.walls);
+                    if (nextNpcs.some((n) => n.knockingAtMayaDoor)) {
+                      nextNpcs = nextNpcs.map((n) =>
+                        n.knockingAtMayaDoor
+                          ? sendNpcBackHomeState(n, allObjects, allWalls)
+                          : n,
+                      );
+                    }
+                    nextDoorbellPrompt = null;
                     nextQueue = [];
                     nextSim = {
                       ...nextSim,
@@ -2908,6 +3070,7 @@ export const useGameStore = create<GameStoreState>()(
             socialFeed: nextSocialFeed,
             unlockedHouseIds: nextUnlockedHouseIds,
             npcs: nextNpcs,
+            doorbellPrompt: nextDoorbellPrompt,
             career: nextCareer,
             shiftPrompt: nextShiftPrompt,
             activeShift: nextActiveShift,
@@ -2943,6 +3106,12 @@ export const useGameStore = create<GameStoreState>()(
           state.placedObjects,
           state.walls,
           state.funds,
+          undefined,
+          {
+            allObjects: getAllWorldObjects(state.placedObjects),
+            allWalls: getAllWorldWalls(state.walls),
+            lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+          },
         );
         if (!choice) {
           set({ idleSimMinutes: 0 });
@@ -3110,6 +3279,14 @@ export const useGameStore = create<GameStoreState>()(
           return false;
         }
 
+        const occupiedSet = item.walkable
+          ? new Set<string>()
+          : new Set(
+              getOccupiedTiles(sel.tileX, sel.tileZ, item.footprint, sel.rotation).map(
+                (t) => `${t.x},${t.z}`,
+              ),
+            );
+
         if (sel.mode === 'place_new') {
           if (state.funds < item.price) {
             state.addFeedback(`Need §${item.price} Simoleons`, 'negative');
@@ -3124,9 +3301,30 @@ export const useGameStore = create<GameStoreState>()(
             rotation: sel.rotation,
           };
 
+          // Safely nudge any visiting NPC standing on the newly occupied solid tile
+          const nextNpcs = state.npcs.map((n) => {
+            if (occupiedSet.has(`${n.tileX},${n.tileZ}`)) {
+              syncNpcRuntimeToTile(n.contactId, MAYA_WELCOME_TILE.x, MAYA_WELCOME_TILE.z, 0);
+              return {
+                ...n,
+                tileX: MAYA_WELCOME_TILE.x,
+                tileZ: MAYA_WELCOME_TILE.z,
+                pose: 'idle' as const,
+                activeObjectId: null,
+                activeProp: null,
+                path: [],
+                pathIndex: 0,
+                pendingGoal: 'idle' as const,
+                pendingObjectId: null,
+              };
+            }
+            return n;
+          });
+
           set({
             funds: state.funds - item.price,
             placedObjects: [...state.placedObjects, newObj],
+            npcs: nextNpcs,
             buildSelection: null,
             feedbacks: [
               ...state.feedbacks.slice(-3),
@@ -3154,16 +3352,44 @@ export const useGameStore = create<GameStoreState>()(
         const nextSim = wasUsingMoved
           ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
+        const nextNpcs = state.npcs.map((n) => {
+          const affectedByMove =
+            n.activeObjectId === sel.movingInstanceId ||
+            n.pendingObjectId === sel.movingInstanceId ||
+            occupiedSet.has(`${n.tileX},${n.tileZ}`);
+          if (!affectedByMove) return n;
+          const needsNudge = occupiedSet.has(`${n.tileX},${n.tileZ}`);
+          const nextX = needsNudge ? MAYA_WELCOME_TILE.x : n.tileX;
+          const nextZ = needsNudge ? MAYA_WELCOME_TILE.z : n.tileZ;
+          if (needsNudge) {
+            syncNpcRuntimeToTile(n.contactId, nextX, nextZ, 0);
+          }
+          return {
+            ...n,
+            tileX: nextX,
+            tileZ: nextZ,
+            pose: 'idle' as const,
+            activeObjectId: null,
+            activeProp: null,
+            path: [],
+            pathIndex: 0,
+            pendingGoal: 'idle' as const,
+            pendingObjectId: null,
+          };
+        });
         const nextQueue = preparePathForFrontAction(
           filteredQueue,
           nextSim,
           movedObjects,
           state.walls,
+          state.unlockedHouseIds,
+          nextNpcs,
         );
 
         set({
           placedObjects: movedObjects,
           sim: nextSim,
+          npcs: nextNpcs,
           actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
@@ -3194,6 +3420,20 @@ export const useGameStore = create<GameStoreState>()(
         const nextSim = wasUsingSold
           ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
+        const nextNpcs = state.npcs.map((n) =>
+          n.activeObjectId === sel.movingInstanceId || n.pendingObjectId === sel.movingInstanceId
+            ? {
+                ...n,
+                pose: 'idle' as const,
+                activeObjectId: null,
+                activeProp: null,
+                path: [],
+                pathIndex: 0,
+                pendingGoal: 'idle' as const,
+                pendingObjectId: null,
+              }
+            : n,
+        );
         const remainingQueue = state.actionQueue.filter(
           (a) => a.targetObjectId !== sel.movingInstanceId,
         );
@@ -3202,12 +3442,15 @@ export const useGameStore = create<GameStoreState>()(
           nextSim,
           remainingObjects,
           state.walls,
+          state.unlockedHouseIds,
+          nextNpcs,
         );
 
         set({
           funds: state.funds + refund,
           placedObjects: remainingObjects,
           sim: nextSim,
+          npcs: nextNpcs,
           actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
