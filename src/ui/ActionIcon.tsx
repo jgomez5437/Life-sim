@@ -10,6 +10,8 @@ import {
   Flame,
   Footprints,
   Gamepad2,
+  Heart,
+  Home,
   Leaf,
   MessageCircle,
   Moon,
@@ -88,6 +90,10 @@ export function ActionIcon({ name, size = 15 }: { name: string; size?: number })
       return <Code2 size={size} />;
     case 'palette':
       return <Palette size={size} />;
+    case 'heart':
+      return <Heart size={size} />;
+    case 'home':
+      return <Home size={size} />;
     case 'footprints':
     default:
       return <Footprints size={size} />;

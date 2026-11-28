@@ -8,14 +8,17 @@ import {
   Gamepad2,
   Heart,
   Home,
+  MapPin,
   Palette,
   Sparkles,
   Truck,
+  UserPlus,
   Users,
   X,
 } from 'lucide-react';
 import { CAREERS, CAREERS_BY_ID } from '../data/careers';
 import { SELF_INTERACTIONS } from '../data/catalog';
+import { NEIGHBOR_HOUSES_BY_ID, isTileInRect } from '../data/neighborhood';
 import {
   DELIVERY_ITEMS,
   ENTERTAINMENT_APP_IDS,
@@ -34,7 +37,12 @@ import {
   isWorkday,
 } from '../engine/careers';
 import { NEED_LABELS, formatSimTime } from '../engine/simulation';
-import { RELATIONSHIP_TIER_META, getRelationshipTier } from '../engine/social';
+import {
+  RELATIONSHIP_TIER_META,
+  ROMANCE_TIER_META,
+  getRelationshipTier,
+  getRomanceTier,
+} from '../engine/social';
 import { useGameStore } from '../store/gameStore';
 import type { NeedKey, PhoneAppId } from '../types/game';
 import { ActionIcon } from './ActionIcon';
@@ -66,6 +74,8 @@ export function PhoneDrawer() {
   const funds = useGameStore((s) => s.funds);
   const sim = useGameStore((s) => s.sim);
   const contacts = useGameStore((s) => s.contacts);
+  const npcs = useGameStore((s) => s.npcs);
+  const unlockedHouseIds = useGameStore((s) => s.unlockedHouseIds);
   const socialFeed = useGameStore((s) => s.socialFeed);
   const career = useGameStore((s) => s.career);
   const shiftPrompt = useGameStore((s) => s.shiftPrompt);
@@ -75,6 +85,8 @@ export function PhoneDrawer() {
   const setPhoneApp = useGameStore((s) => s.setPhoneApp);
   const setPhoneCase = useGameStore((s) => s.setPhoneCase);
   const enqueueContactInteraction = useGameStore((s) => s.enqueueContactInteraction);
+  const inviteContactOver = useGameStore((s) => s.inviteContactOver);
+  const visitNeighborHouse = useGameStore((s) => s.visitNeighborHouse);
   const orderDelivery = useGameStore((s) => s.orderDelivery);
   const enqueueSelfInteraction = useGameStore((s) => s.enqueueSelfInteraction);
   const joinCareer = useGameStore((s) => s.joinCareer);
@@ -235,7 +247,7 @@ export function PhoneDrawer() {
                   <Users size={20} />
                 </span>
                 <span className="phone-app-name">Social</span>
-                <span className="phone-app-sub">{contacts.length} Friends</span>
+                <span className="phone-app-sub">{contacts.length} Neighbors</span>
               </button>
 
               <button
@@ -330,7 +342,7 @@ export function PhoneDrawer() {
                 className={`phone-seg-btn ${socialTab === 'contacts' ? 'active' : ''}`}
                 onClick={() => setSocialTab('contacts')}
               >
-                Contacts ({contacts.length})
+                Neighbors ({contacts.length})
               </button>
               <button
                 type="button"
@@ -346,6 +358,31 @@ export function PhoneDrawer() {
                 {contacts.map((contact) => {
                   const tier = getRelationshipTier(contact.relationship);
                   const tierMeta = RELATIONSHIP_TIER_META[tier];
+                  const romanceVal = contact.romance ?? 0;
+                  const romanceMeta = ROMANCE_TIER_META[getRomanceTier(romanceVal)];
+                  const homeHouse = NEIGHBOR_HOUSES_BY_ID[contact.homeHouseId];
+                  const npcWorld = npcs.find((n) => n.contactId === contact.id);
+                  const isHouseUnlocked = unlockedHouseIds.includes(contact.homeHouseId);
+                  const isHeadingToMaya = Boolean(
+                    npcWorld &&
+                      (npcWorld.knockingAtMayaDoor ||
+                        npcWorld.pendingGoal === 'visit_maya_door' ||
+                        npcWorld.pendingGoal === 'enter_maya_home'),
+                  );
+                  const isInsideOwnHome = Boolean(
+                    npcWorld &&
+                      isTileInRect(
+                        { x: npcWorld.tileX, z: npcWorld.tileZ },
+                        homeHouse.houseRect,
+                      ),
+                  );
+                  const statusLabel = npcWorld?.visitingMaya
+                    ? 'Visiting You'
+                    : isHeadingToMaya
+                      ? 'Walking Over'
+                      : isInsideOwnHome
+                        ? 'At Home'
+                        : 'Out Strolling';
                   const isOpen = expandedContactId === contact.id;
                   return (
                     <div key={contact.id} className={`contact-card ${isOpen ? 'expanded' : ''}`}>
@@ -375,7 +412,10 @@ export function PhoneDrawer() {
                               {tierMeta.label}
                             </span>
                           </div>
-                          <span className="contact-role">{contact.role}</span>
+                          <div className="contact-location-row">
+                            <span className="contact-role">{homeHouse.name}</span>
+                            <span className="contact-status-dot">· {statusLabel}</span>
+                          </div>
                           <div className="rel-bar-track">
                             <div
                               className="rel-bar-fill"
@@ -385,12 +425,62 @@ export function PhoneDrawer() {
                               }}
                             />
                           </div>
+                          {romanceVal > 0 && (
+                            <div className="romance-bar-row">
+                              <Heart size={10} color={romanceMeta.color} />
+                              <div className="rel-bar-track romance-track">
+                                <div
+                                  className="rel-bar-fill"
+                                  style={{
+                                    width: `${romanceVal}%`,
+                                    background: romanceMeta.color,
+                                  }}
+                                />
+                              </div>
+                              <span
+                                className="romance-tier-label"
+                                style={{ color: romanceMeta.color }}
+                              >
+                                {romanceMeta.label}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </button>
 
                       {isOpen && (
                         <div className="contact-expand-body">
                           <p className="contact-bio">{contact.bio}</p>
+                          <div className="contact-world-actions">
+                            <button
+                              type="button"
+                              className="contact-world-btn invite"
+                              disabled={
+                                sim.awayAtWork ||
+                                Boolean(npcWorld?.visitingMaya) ||
+                                isHeadingToMaya
+                              }
+                              onClick={() => inviteContactOver(contact.id)}
+                            >
+                              <UserPlus size={12} />
+                              <span>
+                                {npcWorld?.visitingMaya
+                                  ? 'Here Now'
+                                  : isHeadingToMaya
+                                    ? 'On the Way'
+                                    : 'Invite Over'}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className="contact-world-btn visit"
+                              disabled={sim.awayAtWork}
+                              onClick={() => visitNeighborHouse(contact.homeHouseId)}
+                            >
+                              <MapPin size={12} />
+                              <span>{isHouseUnlocked ? 'Go Inside' : 'Visit House'}</span>
+                            </button>
+                          </div>
                           <div className="contact-actions-grid">
                             {PHONE_SOCIAL_ACTIONS.map((act) => (
                               <button

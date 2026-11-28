@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { useGameStore } from '../store/gameStore';
+import type { NeighborHouseId } from '../types/game';
 import { ActionIcon } from './ActionIcon';
 
 export function PieMenu() {
@@ -8,6 +9,9 @@ export function PieMenu() {
   const enqueueWalk = useGameStore((s) => s.enqueueWalk);
   const enqueueObjectInteraction = useGameStore((s) => s.enqueueObjectInteraction);
   const enqueueSelfInteraction = useGameStore((s) => s.enqueueSelfInteraction);
+  const enqueueKnockOnHouse = useGameStore((s) => s.enqueueKnockOnHouse);
+  const enqueueNpcInteraction = useGameStore((s) => s.enqueueNpcInteraction);
+  const sendVisitorHome = useGameStore((s) => s.sendVisitorHome);
 
   useEffect(() => {
     if (!pieMenu) return;
@@ -42,6 +46,24 @@ export function PieMenu() {
       enqueueSelfInteraction(optId.replace('self:', ''));
       return;
     }
+    if (optId.startsWith('knock:')) {
+      const houseId = optId.replace('knock:', '') as NeighborHouseId;
+      enqueueKnockOnHouse(houseId);
+      return;
+    }
+    if (optId.startsWith('npc:')) {
+      const [, contactId, actionId] = optId.split(':');
+      if (contactId && actionId) {
+        enqueueNpcInteraction(contactId, actionId);
+      }
+      return;
+    }
+    if (optId.startsWith('npc_send_home:')) {
+      const contactId = optId.replace('npc_send_home:', '');
+      sendVisitorHome(contactId);
+      closePieMenu();
+      return;
+    }
     if (pieMenu.objectId) {
       enqueueObjectInteraction(pieMenu.objectId, optId);
     }
@@ -63,6 +85,7 @@ export function PieMenu() {
       >
         <div className="pie-hub">
           <div className="pie-hub-title">{pieMenu.title}</div>
+          {pieMenu.subtitle && <div className="pie-hub-sub">{pieMenu.subtitle}</div>}
         </div>
 
         {pieMenu.options.map((opt, idx) => {

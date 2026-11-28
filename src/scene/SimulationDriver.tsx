@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { tileToWorld } from '../engine/grid';
+import { ensureNpcRuntime } from '../engine/npcRuntime';
 import { simRuntime } from '../engine/simRuntime';
 import { useGameStore } from '../store/gameStore';
 
@@ -8,10 +9,13 @@ import { useGameStore } from '../store/gameStore';
 const SIM_MINUTES_PER_REAL_SEC = 2.0;
 /** Base walking speed in tiles per real-world second at 1x speed. */
 const WALK_TILES_PER_SEC = 2.25;
+/** Slightly relaxed strolling speed for neighborhood NPCs. */
+const NPC_WALK_TILES_PER_SEC = 1.9;
 
 export function SimulationDriver() {
   const simMinuteAccumulator = useRef(0);
   const autonomyTimer = useRef(0);
+  const npcAutonomyTimer = useRef(0);
   const feedbackPruneTimer = useRef(0);
 
   useFrame((_, delta) => {
@@ -32,6 +36,9 @@ export function SimulationDriver() {
       state.promotionSummary
     ) {
       simRuntime.isMoving = false;
+      for (const npc of state.npcs) {
+        ensureNpcRuntime(npc).isMoving = false;
+      }
       return;
     }
 
@@ -76,7 +83,43 @@ export function SimulationDriver() {
       simRuntime.isMoving = false;
     }
 
-    // 2. Batch Sim-minute clock & needs updates (~4 Hz) so React HUD stays lean
+    // 2. Advance live neighborhood NPC movement smoothly at 60 FPS
+    const npcStep = NPC_WALK_TILES_PER_SEC * scaledDt;
+    for (const npc of state.npcs) {
+      const rt = ensureNpcRuntime(npc);
+      if (npc.path.length > 0 && npc.pathIndex < npc.path.length && !npc.talkingWithMaya) {
+        const nextTile = npc.path[npc.pathIndex];
+        const targetWorld = tileToWorld(nextTile.x, nextTile.z);
+        const dx = targetWorld.x - rt.worldX;
+        const dz = targetWorld.z - rt.worldZ;
+        const dist = Math.hypot(dx, dz);
+
+        rt.isMoving = true;
+        rt.walkCycle += scaledDt * 4.2;
+        if (dist > 0.001) {
+          rt.facingAngle = Math.atan2(dx, dz);
+        }
+
+        if (dist <= npcStep) {
+          rt.worldX = targetWorld.x;
+          rt.worldZ = targetWorld.z;
+          const nextIdx = npc.pathIndex + 1;
+          useGameStore.getState().updateNpcTile(npc.contactId, nextTile, rt.facingAngle, nextIdx);
+          if (nextIdx >= npc.path.length) {
+            rt.isMoving = false;
+            useGameStore.getState().finishNpcRoute(npc.contactId);
+          }
+        } else {
+          rt.worldX += (dx / dist) * npcStep;
+          rt.worldZ += (dz / dist) * npcStep;
+        }
+      } else {
+        rt.isMoving = false;
+        rt.facingAngle = npc.facingAngle;
+      }
+    }
+
+    // 3. Batch Sim-minute clock & needs updates (~4 Hz) so React HUD stays lean
     simMinuteAccumulator.current += scaledDt * SIM_MINUTES_PER_REAL_SEC;
     if (simMinuteAccumulator.current >= 0.45) {
       const chunk = simMinuteAccumulator.current;
@@ -84,13 +127,20 @@ export function SimulationDriver() {
       useGameStore.getState().tickSimMinutes(chunk);
     }
 
-    // 3. Periodic Free Will autonomy check when idle and on-lot
+    // 4. Periodic Free Will autonomy check when idle and on-lot
     autonomyTimer.current += dt;
     if (autonomyTimer.current >= 1.2) {
       autonomyTimer.current = 0;
       if (!useGameStore.getState().sim.awayAtWork) {
         useGameStore.getState().tryAutonomousDecision();
       }
+    }
+
+    // 5. Periodic neighborhood NPC wandering & home-life autonomy
+    npcAutonomyTimer.current += dt;
+    if (npcAutonomyTimer.current >= 2.2) {
+      npcAutonomyTimer.current = 0;
+      useGameStore.getState().stepNpcAutonomy();
     }
   });
 

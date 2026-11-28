@@ -73,9 +73,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             Radial Pie Menu. Tap any Need bar to auto-solve it!
           </li>
           <li>
+            <strong>Neighborhood &amp; Neighbors:</strong> Pan across Sunnyside Lane to visit 3
+            neighbor houses! Tap a roof or front door to <em>Knock on Door</em>, be invited inside,
+            and chat face-to-face with Leo, Nora, Priya, Marcus &amp; Camille.
+          </li>
+          <li>
             <strong>Smartphone &amp; Careers:</strong> Tap the Phone button beside Maya’s portrait
-            to chat with friends on Social Bunny, apply for 5 careers, work from home, order
-            Zoomers delivery, or swap phone cases.
+            to invite neighbors over, visit their homes, check Social Bunny, apply for 5 careers,
+            work from home, order Zoomers delivery, or swap phone cases.
           </li>
           <li>
             <strong>Build &amp; Buy:</strong> Pick items from the bottom dock or tap existing

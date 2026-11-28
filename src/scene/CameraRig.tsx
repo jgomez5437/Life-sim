@@ -6,10 +6,13 @@ import { useGameStore } from '../store/gameStore';
 import { pointerGuard } from './pointerGuard';
 
 const MIN_RADIUS = 7.2;
-const MAX_RADIUS = 22.5;
+const MAX_RADIUS = 34.0;
 const MIN_POLAR = 0.46;
 const MAX_POLAR = 1.15;
-const PAN_LIMIT = 7.6;
+const PAN_MIN_X = -19.5;
+const PAN_MAX_X = 20.5;
+const PAN_MIN_Z = -4.5;
+const PAN_MAX_Z = 21.5;
 const DRAG_THRESHOLD_PX = 8;
 
 interface ActivePointer {
@@ -136,8 +139,8 @@ export function CameraRig() {
         const nextX = target.current.x - dx * panScale * rightX + dy * panScale * forwardX;
         const nextZ = target.current.z - dx * panScale * rightZ + dy * panScale * forwardZ;
 
-        target.current.x = THREE.MathUtils.clamp(nextX, -PAN_LIMIT, PAN_LIMIT);
-        target.current.z = THREE.MathUtils.clamp(nextZ, -PAN_LIMIT, PAN_LIMIT);
+        target.current.x = THREE.MathUtils.clamp(nextX, PAN_MIN_X, PAN_MAX_X);
+        target.current.z = THREE.MathUtils.clamp(nextZ, PAN_MIN_Z, PAN_MAX_Z);
       } else if (pointers.size === 2) {
         const pair = getTwoPointers();
         if (!pair) return;
@@ -246,9 +249,23 @@ export function CameraRig() {
       );
     } else {
       if (simRuntime.focusSimRequested) {
-        target.current.x = THREE.MathUtils.clamp(simRuntime.worldX, -PAN_LIMIT, PAN_LIMIT);
-        target.current.z = THREE.MathUtils.clamp(simRuntime.worldZ, -PAN_LIMIT, PAN_LIMIT);
+        target.current.x = THREE.MathUtils.clamp(simRuntime.worldX, PAN_MIN_X, PAN_MAX_X);
+        target.current.z = THREE.MathUtils.clamp(simRuntime.worldZ, PAN_MIN_Z, PAN_MAX_Z);
         simRuntime.focusSimRequested = false;
+      }
+
+      if (simRuntime.focusWorldTarget) {
+        target.current.x = THREE.MathUtils.clamp(
+          simRuntime.focusWorldTarget.x,
+          PAN_MIN_X,
+          PAN_MAX_X,
+        );
+        target.current.z = THREE.MathUtils.clamp(
+          simRuntime.focusWorldTarget.z,
+          PAN_MIN_Z,
+          PAN_MAX_Z,
+        );
+        simRuntime.focusWorldTarget = null;
       }
 
       currentTarget.current.lerp(target.current, lerpFactor);

@@ -3,7 +3,17 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 import { CAREERS_BY_ID } from '../data/careers';
 import { CATALOG_BY_ID, SELF_INTERACTIONS } from '../data/catalog';
 import {
+  ALL_NEIGHBOR_OBJECTS,
+  ALL_NEIGHBOR_WALLS,
+  MAYA_FRONT_DOOR_OUTSIDE,
+  MAYA_WELCOME_TILE,
+  NEIGHBOR_HOUSES_BY_ID,
+  getHouseCenterWorld,
+  getNeighborHouseContainingTile,
+} from '../data/neighborhood';
+import {
   DELIVERY_ITEMS,
+  FACE_TO_FACE_SOCIAL_ACTIONS,
   PHONE_SOCIAL_ACTIONS,
   createInitialContacts,
   createInitialSocialFeed,
@@ -32,11 +42,20 @@ import {
   pickChanceCardForCareer,
 } from '../engine/careers';
 import {
+  findAdjacentStandTile,
   getBestInteractionSlot,
-  isInLotBounds,
+  getOccupiedTiles,
+  isInWorldBounds,
   isPlacementValid,
   tileToWorld,
 } from '../engine/grid';
+import {
+  createInitialNpcWorldStates,
+  getLockedDoorWallIdsForMaya,
+  getLockedDoorWallIdsForNpc,
+  pickNextNpcAutonomyPlan,
+} from '../engine/npcEngine';
+import { syncAllNpcsRuntime, syncNpcRuntimeToTile } from '../engine/npcRuntime';
 import { findPath } from '../engine/pathfinding';
 import { simRuntime, syncRuntimeToTile } from '../engine/simRuntime';
 import {
@@ -52,12 +71,15 @@ import type {
   ActiveShiftState,
   BuildSelection,
   CareerTrackId,
+  DoorbellPromptState,
   FloatingFeedback,
   GameClock,
   GameMode,
   GraphicsQuality,
   NeedKey,
+  NeighborHouseId,
   NpcContact,
+  NpcWorldState,
   PhoneAppId,
   PhoneCaseId,
   PieMenuTarget,
@@ -112,6 +134,11 @@ export interface GameStoreState {
   contacts: NpcContact[];
   socialFeed: SocialPost[];
 
+  // Neighborhood & Live NPC state
+  unlockedHouseIds: NeighborHouseId[];
+  npcs: NpcWorldState[];
+  doorbellPrompt: DoorbellPromptState | null;
+
   // Career & Job System state
   career: SimCareerState | null;
   shiftPrompt: ShiftPromptState | null;
@@ -139,6 +166,17 @@ export interface GameStoreState {
   setPhoneCase: (caseId: PhoneCaseId) => void;
   enqueueContactInteraction: (contactId: string, socialActionId: string) => boolean;
   orderDelivery: (deliveryItemId: string) => boolean;
+
+  // Neighborhood & Live NPC actions
+  enqueueKnockOnHouse: (houseId: NeighborHouseId) => boolean;
+  enqueueNpcInteraction: (contactId: string, socialActionId: string) => boolean;
+  inviteContactOver: (contactId: string) => boolean;
+  visitNeighborHouse: (houseId: NeighborHouseId) => boolean;
+  respondToDoorbell: (accept: boolean) => void;
+  sendVisitorHome: (contactId: string) => void;
+  updateNpcTile: (contactId: string, tile: TileCoord, facingAngle: number, nextPathIndex: number) => void;
+  finishNpcRoute: (contactId: string) => void;
+  stepNpcAutonomy: () => void;
 
   // Career & Job System actions
   joinCareer: (careerId: CareerTrackId) => void;
@@ -184,6 +222,14 @@ export interface GameStoreState {
   resetStarterLot: () => void;
 }
 
+function getAllWorldObjects(homeObjects: PlacedObject[]): PlacedObject[] {
+  return [...homeObjects, ...ALL_NEIGHBOR_OBJECTS];
+}
+
+function getAllWorldWalls(homeWalls: WallSegment[]): WallSegment[] {
+  return [...homeWalls, ...ALL_NEIGHBOR_WALLS];
+}
+
 function findInitialBuildTile(
   catalogId: string,
   rotation: RotationDeg,
@@ -217,9 +263,14 @@ function preparePathForFrontAction(
   sim: SimState,
   placedObjects: PlacedObject[],
   walls: WallSegment[],
+  unlockedHouseIds: NeighborHouseId[] = [],
+  npcs: NpcWorldState[] = [],
 ): ActionQueueItem[] {
   let remaining = queue;
   const simTile = { x: sim.tileX, z: sim.tileZ };
+  const allObjects = getAllWorldObjects(placedObjects);
+  const allWalls = getAllWorldWalls(walls);
+  const lockedDoors = getLockedDoorWallIdsForMaya(unlockedHouseIds);
 
   while (remaining.length > 0) {
     const [front, ...rest] = remaining;
@@ -241,22 +292,49 @@ function preparePathForFrontAction(
     let facingAngle = front.facingAngle;
 
     if (front.kind === 'object' && front.targetObjectId) {
-      const obj = placedObjects.find((o) => o.instanceId === front.targetObjectId);
+      const obj = allObjects.find((o) => o.instanceId === front.targetObjectId);
       const item = obj ? CATALOG_BY_ID[obj.catalogId] : null;
       if (!obj || !item) {
         remaining = rest;
         continue;
       }
-      const slot = getBestInteractionSlot(obj, item, placedObjects, walls, simTile);
+      const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, simTile, lockedDoors);
       if (!slot) {
         remaining = rest;
         continue;
       }
       targetTile = slot.tile;
       facingAngle = slot.facingAngle;
+    } else if (front.kind === 'social_npc' && front.targetNpcId) {
+      const npc = npcs.find((n) => n.contactId === front.targetNpcId);
+      if (!npc) {
+        remaining = rest;
+        continue;
+      }
+      const stand = findAdjacentStandTile(
+        { x: npc.tileX, z: npc.tileZ },
+        simTile,
+        allObjects,
+        allWalls,
+        lockedDoors,
+      );
+      if (!stand) {
+        remaining = rest;
+        continue;
+      }
+      targetTile = stand.tile;
+      facingAngle = stand.facingAngle;
+    } else if (front.kind === 'knock' && front.targetHouseId) {
+      const house = NEIGHBOR_HOUSES_BY_ID[front.targetHouseId];
+      if (!house) {
+        remaining = rest;
+        continue;
+      }
+      targetTile = house.knockTile;
+      facingAngle = house.knockFacingAngle;
     }
 
-    const path = findPath(simTile, targetTile, placedObjects, walls);
+    const path = findPath(simTile, targetTile, allObjects, allWalls, lockedDoors);
     if (path === null) {
       remaining = rest;
       continue;
@@ -282,9 +360,16 @@ function buildCommuteAction(
   placedObjects: PlacedObject[],
   walls: WallSegment[],
   careerName: string,
+  unlockedHouseIds: NeighborHouseId[] = [],
 ): ActionQueueItem | null {
   const startTile = { x: sim.tileX, z: sim.tileZ };
-  const path = findPath(startTile, COMMUTE_STREET_TILE, placedObjects, walls);
+  const path = findPath(
+    startTile,
+    COMMUTE_STREET_TILE,
+    getAllWorldObjects(placedObjects),
+    getAllWorldWalls(walls),
+    getLockedDoorWallIdsForMaya(unlockedHouseIds),
+  );
   if (path === null) return null;
   return {
     id: nextId('act'),
@@ -307,8 +392,15 @@ function buildCommuteAction(
 function buildReturnHomeAction(
   placedObjects: PlacedObject[],
   walls: WallSegment[],
+  unlockedHouseIds: NeighborHouseId[] = [],
 ): ActionQueueItem[] {
-  const path = findPath(COMMUTE_STREET_TILE, RETURN_HOME_TILE, placedObjects, walls);
+  const path = findPath(
+    COMMUTE_STREET_TILE,
+    RETURN_HOME_TILE,
+    getAllWorldObjects(placedObjects),
+    getAllWorldWalls(walls),
+    getLockedDoorWallIdsForMaya(unlockedHouseIds),
+  );
   if (!path || path.length === 0) return [];
   return [
     {
@@ -329,6 +421,46 @@ function buildReturnHomeAction(
     },
   ];
 }
+
+function sendNpcBackHomeState(
+  npc: NpcWorldState,
+  allObjects: PlacedObject[],
+  allWalls: WallSegment[],
+  waveUntilSimMinute?: number,
+): NpcWorldState {
+  const house = NEIGHBOR_HOUSES_BY_ID[npc.homeHouseId];
+  const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
+  const path =
+    (house &&
+      findPath(
+        { x: npc.tileX, z: npc.tileZ },
+        house.greetTile,
+        allObjects,
+        allWalls,
+        lockedForNpc,
+      )) ||
+    [];
+  return {
+    ...npc,
+    visitingMaya: false,
+    knockingAtMayaDoor: false,
+    talkingWithMaya: false,
+    activeObjectId: null,
+    activeProp: null,
+    pose: path.length > 0 ? 'walk' : 'idle',
+    path,
+    pathIndex: 0,
+    pendingGoal: 'return_home',
+    pendingObjectId: null,
+    speechBubble: waveUntilSimMinute
+      ? { icon: 'wave', expiresAtSimMinute: waveUntilSimMinute }
+      : null,
+  };
+}
+
+const SEED_CONTACTS = createInitialContacts();
+const SEED_NPCS = createInitialNpcWorldStates(SEED_CONTACTS);
+syncAllNpcsRuntime(SEED_NPCS);
 
 export const useGameStore = create<GameStoreState>()(
   persist(
@@ -356,8 +488,13 @@ export const useGameStore = create<GameStoreState>()(
       phoneApp: 'home',
       phoneCaseId: 'coastal_mint',
       phoneHasBadge: false,
-      contacts: createInitialContacts(),
+      contacts: SEED_CONTACTS.map((c) => ({ ...c, appearance: { ...c.appearance } })),
       socialFeed: createInitialSocialFeed(),
+
+      // Neighborhood & Live NPC state
+      unlockedHouseIds: [],
+      npcs: SEED_NPCS.map((n) => ({ ...n, path: [] })),
+      doorbellPrompt: null,
 
       // Career & Job System state
       career: null,
@@ -370,6 +507,7 @@ export const useGameStore = create<GameStoreState>()(
         const state = get();
         if (state.mode === mode) return;
         if (mode === 'build') {
+          simRuntime.focusWorldTarget = { x: 0, z: 0 };
           set({
             mode: 'build',
             wardrobeOpen: false,
@@ -386,6 +524,8 @@ export const useGameStore = create<GameStoreState>()(
             state.sim,
             state.placedObjects,
             state.walls,
+            state.unlockedHouseIds,
+            state.npcs,
           );
           const frontWasCancelled =
             state.actionQueue.length > 0 &&
@@ -401,6 +541,569 @@ export const useGameStore = create<GameStoreState>()(
               ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
               : state.sim,
           });
+        }
+      },
+
+      enqueueKnockOnHouse: (houseId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        const house = NEIGHBOR_HOUSES_BY_ID[houseId];
+        if (!house) return false;
+        if (state.unlockedHouseIds.includes(houseId)) {
+          state.addFeedback(`Already invited inside ${house.name}!`, 'info');
+          return state.enqueueWalk(house.greetTile);
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const path = findPath(startTile, house.knockTile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback(`Cannot reach ${house.name} right now`, 'negative');
+          return false;
+        }
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'knock',
+          label: `Knock at ${house.name}`,
+          icon: 'home',
+          targetHouseId: houseId,
+          targetTile: { ...house.knockTile },
+          facingAngle: house.knockFacingAngle,
+          durationSimMinutes: 5,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: {},
+          animationPose: 'stand_use',
+          bubbleIcon: 'knock',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      enqueueNpcInteraction: (contactId, socialActionId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+
+        const npc = state.npcs.find((n) => n.contactId === contactId);
+        const contact = state.contacts.find((c) => c.id === contactId);
+        const socialDef = FACE_TO_FACE_SOCIAL_ACTIONS.find((a) => a.id === socialActionId);
+        if (!npc || !contact || !socialDef) return false;
+
+        // If NPC is inside a locked neighbor house, knock on their front door first!
+        const npcHouse = getNeighborHouseContainingTile({ x: npc.tileX, z: npc.tileZ });
+        if (npcHouse && !state.unlockedHouseIds.includes(npcHouse.id)) {
+          state.addFeedback(`Knocking at ${npcHouse.name} first!`, 'info');
+          return state.enqueueKnockOnHouse(npcHouse.id);
+        }
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+
+        const stand = findAdjacentStandTile(
+          { x: npc.tileX, z: npc.tileZ },
+          startTile,
+          allObjects,
+          allWalls,
+          lockedDoors,
+        );
+        if (!stand) {
+          state.addFeedback(`Cannot get close to ${contact.name}`, 'negative');
+          return false;
+        }
+
+        const path = findPath(startTile, stand.tile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback(`Cannot reach ${contact.name} right now`, 'negative');
+          return false;
+        }
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'social_npc',
+          label: `${socialDef.label}: ${contact.name.split(' ')[0]}`,
+          icon: socialDef.icon,
+          interactionId: socialDef.id,
+          targetNpcId: contactId,
+          contactId,
+          targetTile: stand.tile,
+          facingAngle: stand.facingAngle,
+          durationSimMinutes: socialDef.durationSimMinutes,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: socialDef.needDeltas,
+          animationPose: 'talk',
+          emotionBoost: socialDef.emotionBoost,
+          relationshipDelta: socialDef.friendshipDelta,
+          romanceDelta: socialDef.romanceDelta,
+          bubbleIcon: socialDef.bubbleIcon,
+          socialPostText: socialDef.postTemplate(contact.name),
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      inviteContactOver: (contactId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Wait until Maya gets home to invite friends over!', 'info');
+          return false;
+        }
+        const npc = state.npcs.find((n) => n.contactId === contactId);
+        const contact = state.contacts.find((c) => c.id === contactId);
+        if (!npc || !contact) return false;
+
+        if (npc.visitingMaya) {
+          state.addFeedback(`${contact.name} is already visiting!`, 'info');
+          return false;
+        }
+
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
+        const path = findPath(
+          { x: npc.tileX, z: npc.tileZ },
+          MAYA_FRONT_DOOR_OUTSIDE,
+          allObjects,
+          allWalls,
+          lockedForNpc,
+        );
+        if (path === null) {
+          state.addFeedback(`${contact.name} couldn't find a clear path over`, 'negative');
+          return false;
+        }
+
+        const arrivedImmediately = path.length === 0;
+        set({
+          phoneOpen: false,
+          pieMenu: null,
+          doorbellPrompt: arrivedImmediately
+            ? {
+                contactId,
+                message: `${contact.name} is at your front door!`,
+              }
+            : state.doorbellPrompt,
+          npcs: state.npcs.map((n) =>
+            n.contactId === contactId
+              ? {
+                  ...n,
+                  pose: arrivedImmediately ? 'idle' : 'walk',
+                  activeObjectId: null,
+                  activeProp: null,
+                  knockingAtMayaDoor: arrivedImmediately,
+                  talkingWithMaya: false,
+                  path,
+                  pathIndex: 0,
+                  pendingGoal: 'visit_maya_door',
+                  speechBubble: {
+                    icon: arrivedImmediately ? 'knock' : 'wave',
+                    expiresAtSimMinute: state.clock.totalMinutes + 20,
+                  },
+                }
+              : n,
+          ),
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `${contact.name} is walking over to your house!`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      visitNeighborHouse: (houseId) => {
+        const house = NEIGHBOR_HOUSES_BY_ID[houseId];
+        if (!house) return false;
+        simRuntime.focusWorldTarget = getHouseCenterWorld(house);
+        return get().enqueueKnockOnHouse(houseId);
+      },
+
+      respondToDoorbell: (accept) => {
+        const state = get();
+        const prompt = state.doorbellPrompt;
+        if (!prompt) return;
+        const npc = state.npcs.find((n) => n.contactId === prompt.contactId);
+        const contact = state.contacts.find((c) => c.id === prompt.contactId);
+        if (!npc || !contact) {
+          set({ doorbellPrompt: null });
+          return;
+        }
+
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
+
+        if (accept) {
+          const path =
+            findPath(
+              { x: npc.tileX, z: npc.tileZ },
+              MAYA_WELCOME_TILE,
+              allObjects,
+              allWalls,
+              lockedForNpc,
+            ) ?? [];
+          set({
+            doorbellPrompt: null,
+            npcs: state.npcs.map((n) =>
+              n.contactId === prompt.contactId
+                ? {
+                    ...n,
+                    visitingMaya: true,
+                    knockingAtMayaDoor: false,
+                    pose: path.length > 0 ? 'walk' : 'idle',
+                    path,
+                    pathIndex: 0,
+                    pendingGoal: 'enter_maya_home',
+                    busyUntilSimMinute: state.clock.totalMinutes + 16,
+                    speechBubble: {
+                      icon: 'wave',
+                      expiresAtSimMinute: state.clock.totalMinutes + 18,
+                    },
+                  }
+                : n,
+            ),
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `${contact.name} came inside to hang out!`,
+                tone: 'positive',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+        } else {
+          const house = NEIGHBOR_HOUSES_BY_ID[npc.homeHouseId];
+          const path =
+            (house &&
+              findPath(
+                { x: npc.tileX, z: npc.tileZ },
+                house.greetTile,
+                allObjects,
+                allWalls,
+                lockedForNpc,
+              )) ||
+            [];
+          set({
+            doorbellPrompt: null,
+            npcs: state.npcs.map((n) =>
+              n.contactId === prompt.contactId
+                ? {
+                    ...n,
+                    visitingMaya: false,
+                    knockingAtMayaDoor: false,
+                    pose: path.length > 0 ? 'walk' : 'idle',
+                    path,
+                    pathIndex: 0,
+                    pendingGoal: 'return_home',
+                    speechBubble: null,
+                  }
+                : n,
+            ),
+            feedbacks: [
+              ...state.feedbacks.slice(-3),
+              {
+                id: nextId('fb'),
+                text: `Maybe next time, ${contact.name.split(' ')[0]}!`,
+                tone: 'info',
+                createdAt: Date.now(),
+              },
+            ],
+          });
+        }
+      },
+
+      sendVisitorHome: (contactId) => {
+        const state = get();
+        const npc = state.npcs.find((n) => n.contactId === contactId);
+        const contact = state.contacts.find((c) => c.id === contactId);
+        if (!npc || !contact) return;
+
+        const house = NEIGHBOR_HOUSES_BY_ID[npc.homeHouseId];
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
+        const path =
+          (house &&
+            findPath(
+              { x: npc.tileX, z: npc.tileZ },
+              house.greetTile,
+              allObjects,
+              allWalls,
+              lockedForNpc,
+            )) ||
+          [];
+
+        set({
+          pieMenu: null,
+          npcs: state.npcs.map((n) =>
+            n.contactId === contactId
+              ? {
+                  ...n,
+                  visitingMaya: false,
+                  knockingAtMayaDoor: false,
+                  talkingWithMaya: false,
+                  activeObjectId: null,
+                  activeProp: null,
+                  pose: path.length > 0 ? 'walk' : 'idle',
+                  path,
+                  pathIndex: 0,
+                  pendingGoal: 'return_home',
+                  speechBubble: {
+                    icon: 'wave',
+                    expiresAtSimMinute: state.clock.totalMinutes + 15,
+                  },
+                }
+              : n,
+          ),
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `${contact.name} headed back home`,
+              tone: 'info',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+      },
+
+      updateNpcTile: (contactId, tile, facingAngle, nextPathIndex) => {
+        set((state) => ({
+          npcs: state.npcs.map((n) =>
+            n.contactId === contactId
+              ? {
+                  ...n,
+                  tileX: tile.x,
+                  tileZ: tile.z,
+                  facingAngle,
+                  pose: 'walk',
+                  activeObjectId: null,
+                  activeProp: null,
+                  pathIndex: nextPathIndex,
+                }
+              : n,
+          ),
+        }));
+      },
+
+      finishNpcRoute: (contactId) => {
+        set((state) => {
+          const npc = state.npcs.find((n) => n.contactId === contactId);
+          if (!npc) return state;
+          const contact = state.contacts.find((c) => c.id === contactId);
+          let nextDoorbell = state.doorbellPrompt;
+          const nextFeedbacks = [...state.feedbacks];
+
+          const updatedNpcs = state.npcs.map((n) => {
+            if (n.contactId !== contactId) return n;
+            if (n.pendingGoal === 'visit_maya_door') {
+              if (state.sim.awayAtWork) {
+                if (contact) {
+                  nextFeedbacks.push({
+                    id: nextId('fb'),
+                    text: `${contact.name.split(' ')[0]} stopped by while Maya was at work`,
+                    tone: 'info',
+                    createdAt: Date.now(),
+                  });
+                }
+                const allObjects = getAllWorldObjects(state.placedObjects);
+                const allWalls = getAllWorldWalls(state.walls);
+                return sendNpcBackHomeState(n, allObjects, allWalls, state.clock.totalMinutes + 12);
+              }
+              if (contact) {
+                nextDoorbell = {
+                  contactId,
+                  message: `${contact.name} is at your front door!`,
+                };
+                nextFeedbacks.push({
+                  id: nextId('fb'),
+                  text: `Doorbell! ${contact.name} is outside`,
+                  tone: 'info',
+                  createdAt: Date.now(),
+                });
+              }
+              return {
+                ...n,
+                path: [],
+                pathIndex: 0,
+                pose: 'idle' as const,
+                facingAngle: Math.PI,
+                knockingAtMayaDoor: true,
+                pendingGoal: 'idle' as const,
+                busyUntilSimMinute: state.clock.totalMinutes + 45,
+                speechBubble: {
+                  icon: 'knock' as const,
+                  expiresAtSimMinute: state.clock.totalMinutes + 30,
+                },
+              };
+            }
+            if (n.pendingGoal === 'return_home') {
+              return {
+                ...n,
+                path: [],
+                pathIndex: 0,
+                pose: 'idle' as const,
+                visitingMaya: false,
+                knockingAtMayaDoor: false,
+                pendingGoal: 'idle' as const,
+                busyUntilSimMinute: state.clock.totalMinutes + 20,
+              };
+            }
+            if (n.pendingGoal === 'use_object' && n.pendingObjectId) {
+              return {
+                ...n,
+                path: [],
+                pathIndex: 0,
+                pose: n.pendingPose ?? 'stand_use',
+                activeObjectId: n.pendingObjectId,
+                activeProp: n.pendingProp ?? null,
+                facingAngle: n.pendingFacingAngle ?? n.facingAngle,
+                pendingGoal: 'idle' as const,
+                pendingObjectId: null,
+                busyUntilSimMinute: state.clock.totalMinutes + 26,
+              };
+            }
+            if (n.pendingGoal === 'greet_maya') {
+              return {
+                ...n,
+                path: [],
+                pathIndex: 0,
+                pose: 'idle' as const,
+                facingAngle: n.pendingFacingAngle ?? n.facingAngle,
+                pendingGoal: 'idle' as const,
+                busyUntilSimMinute: state.clock.totalMinutes + 18,
+                speechBubble: {
+                  icon: 'wave' as const,
+                  expiresAtSimMinute: state.clock.totalMinutes + 18,
+                },
+              };
+            }
+            return {
+              ...n,
+              path: [],
+              pathIndex: 0,
+              pose: 'idle' as const,
+              pendingGoal: 'idle' as const,
+              busyUntilSimMinute: state.clock.totalMinutes + 18,
+            };
+          });
+
+          return {
+            npcs: updatedNpcs,
+            doorbellPrompt: nextDoorbell,
+            feedbacks: nextFeedbacks.slice(-4),
+          };
+        });
+      },
+
+      stepNpcAutonomy: () => {
+        const state = get();
+        if (state.mode !== 'live' || state.wardrobeOpen || state.speed === 0) return;
+
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const now = state.clock.totalMinutes;
+        let changed = false;
+
+        const nextNpcs = state.npcs.map((npc, idx) => {
+          // Skip NPCs currently walking, talking to Maya, knocking at Maya's door, or still busy
+          if (
+            npc.path.length > 0 ||
+            npc.talkingWithMaya ||
+            npc.knockingAtMayaDoor ||
+            now < npc.busyUntilSimMinute
+          ) {
+            return npc;
+          }
+
+          const seed = Math.floor(now) + idx * 17 + state.clock.day * 31;
+          const plan = pickNextNpcAutonomyPlan(
+            npc,
+            allObjects,
+            allWalls,
+            state.placedObjects,
+            state.clock.hour,
+            seed,
+          );
+          if (!plan) {
+            changed = true;
+            return {
+              ...npc,
+              pose: 'idle' as const,
+              activeObjectId: null,
+              activeProp: null,
+              busyUntilSimMinute: now + 14,
+            };
+          }
+
+          changed = true;
+          return {
+            ...npc,
+            pose: plan.path.length > 0 ? ('walk' as const) : (plan.pendingPose ?? ('idle' as const)),
+            activeObjectId: plan.path.length > 0 ? null : (plan.pendingObjectId ?? null),
+            activeProp: plan.path.length > 0 ? null : (plan.pendingProp ?? null),
+            path: plan.path,
+            pathIndex: 0,
+            pendingGoal: plan.pendingGoal,
+            pendingObjectId: plan.pendingObjectId ?? null,
+            pendingPose: plan.pendingPose,
+            pendingProp: plan.pendingProp ?? null,
+            pendingFacingAngle: plan.pendingFacingAngle,
+            busyUntilSimMinute: now + plan.durationMinutes,
+          };
+        });
+
+        if (changed) {
+          set({ npcs: nextNpcs });
         }
       },
 
@@ -812,6 +1515,7 @@ export const useGameStore = create<GameStoreState>()(
           state.placedObjects,
           state.walls,
           careerDef.name,
+          state.unlockedHouseIds,
         );
 
         if (commute) {
@@ -845,8 +1549,17 @@ export const useGameStore = create<GameStoreState>()(
           endTotalMinutes,
           state.clock.totalMinutes + 60,
         );
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const nextNpcs = state.npcs.some((n) => n.knockingAtMayaDoor)
+          ? state.npcs.map((n) =>
+              n.knockingAtMayaDoor ? sendNpcBackHomeState(n, allObjects, allWalls) : n,
+            )
+          : state.npcs;
         set({
           shiftPrompt: null,
+          doorbellPrompt: null,
+          npcs: nextNpcs,
           phoneOpen: false,
           pieMenu: null,
           actionQueue: [],
@@ -1143,10 +1856,16 @@ export const useGameStore = create<GameStoreState>()(
           state.addFeedback('Maya is at work right now!', 'info');
           return false;
         }
-        if (!isInLotBounds(tile.x, tile.z)) return false;
+        if (!isInWorldBounds(tile.x, tile.z)) return false;
         if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
           state.addFeedback('Action queue is full', 'info');
           return false;
+        }
+
+        // If user taps inside a locked neighbor house, offer to knock on their door instead!
+        const houseAtTile = getNeighborHouseContainingTile(tile);
+        if (houseAtTile && !state.unlockedHouseIds.includes(houseAtTile.id)) {
+          return state.enqueueKnockOnHouse(houseAtTile.id);
         }
 
         const startTile =
@@ -1154,7 +1873,13 @@ export const useGameStore = create<GameStoreState>()(
             ? state.actionQueue[state.actionQueue.length - 1].targetTile
             : { x: state.sim.tileX, z: state.sim.tileZ };
 
-        const path = findPath(startTile, tile, state.placedObjects, state.walls);
+        const path = findPath(
+          startTile,
+          tile,
+          getAllWorldObjects(state.placedObjects),
+          getAllWorldWalls(state.walls),
+          getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+        );
         if (path === null) {
           state.addFeedback('Cannot reach that spot', 'negative');
           return false;
@@ -1187,6 +1912,7 @@ export const useGameStore = create<GameStoreState>()(
         set({
           actionQueue: [...state.actionQueue, action],
           pieMenu: null,
+          phoneOpen: false,
           idleSimMinutes: 0,
         });
         return true;
@@ -1203,12 +1929,36 @@ export const useGameStore = create<GameStoreState>()(
           return false;
         }
 
-        const obj = state.placedObjects.find((o) => o.instanceId === objectId);
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const obj = allObjects.find((o) => o.instanceId === objectId);
         if (!obj) return false;
         const item = CATALOG_BY_ID[obj.catalogId];
         if (!item) return false;
         const interaction = item.interactions.find((i) => i.id === interactionId);
         if (!interaction) return false;
+
+        // Neighbor-house guest etiquette checks
+        if (obj.houseId) {
+          if (!state.unlockedHouseIds.includes(obj.houseId)) {
+            return state.enqueueKnockOnHouse(obj.houseId);
+          }
+          if (interaction.opensWardrobe) {
+            state.addFeedback('Use your own dresser or mirror at home to style Maya', 'info');
+            return false;
+          }
+          if (item.proceduralType === 'bed') {
+            const house = NEIGHBOR_HOUSES_BY_ID[obj.houseId];
+            const hasGoodFriend = house.residentIds.some((resId) => {
+              const contact = state.contacts.find((c) => c.id === resId);
+              return (contact?.relationship ?? 0) >= 65;
+            });
+            if (!hasGoodFriend) {
+              state.addFeedback('Polite Guest: Become Good Friends (65+) to nap here!', 'info');
+              return false;
+            }
+          }
+        }
 
         const cost = interaction.cost ?? 0;
         if (cost > state.funds) {
@@ -1221,13 +1971,14 @@ export const useGameStore = create<GameStoreState>()(
             ? state.actionQueue[state.actionQueue.length - 1].targetTile
             : { x: state.sim.tileX, z: state.sim.tileZ };
 
-        const slot = getBestInteractionSlot(obj, item, state.placedObjects, state.walls, startTile);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, startTile, lockedDoors);
         if (!slot) {
           state.addFeedback(`${item.name} is blocked!`, 'negative');
           return false;
         }
 
-        const path = findPath(startTile, slot.tile, state.placedObjects, state.walls);
+        const path = findPath(startTile, slot.tile, allObjects, allWalls, lockedDoors);
         if (path === null) {
           state.addFeedback(`Cannot reach ${item.name}`, 'negative');
           return false;
@@ -1259,6 +2010,7 @@ export const useGameStore = create<GameStoreState>()(
         set({
           actionQueue: [...state.actionQueue, action],
           pieMenu: null,
+          phoneOpen: false,
           idleSimMinutes: 0,
         });
         return true;
@@ -1329,6 +2081,11 @@ export const useGameStore = create<GameStoreState>()(
           state.walls,
           state.funds,
           needKey,
+          {
+            allObjects: getAllWorldObjects(state.placedObjects),
+            allWalls: getAllWorldWalls(state.walls),
+            lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+          },
         );
         if (!choice) {
           state.addFeedback(`No available way to restore ${needKey}`, 'negative');
@@ -1346,11 +2103,27 @@ export const useGameStore = create<GameStoreState>()(
           const isFront = state.actionQueue[0]?.id === actionId;
           const remaining = state.actionQueue.filter((a) => a.id !== actionId);
           const nextQueue = isFront
-            ? preparePathForFrontAction(remaining, state.sim, state.placedObjects, state.walls)
+            ? preparePathForFrontAction(
+                remaining,
+                state.sim,
+                state.placedObjects,
+                state.walls,
+                state.unlockedHouseIds,
+                state.npcs,
+              )
             : remaining;
           const isCommuteCancel = cancelled?.kind === 'commute';
+          const releasedNpcId =
+            isFront && cancelled?.kind === 'social_npc' ? cancelled.targetNpcId : null;
           return {
             actionQueue: nextQueue,
+            npcs: releasedNpcId
+              ? state.npcs.map((n) =>
+                  n.contactId === releasedNpcId
+                    ? { ...n, talkingWithMaya: false, pose: 'idle', speechBubble: null }
+                    : n,
+                )
+              : state.npcs,
             career:
               isCommuteCancel && state.career
                 ? {
@@ -1371,7 +2144,13 @@ export const useGameStore = create<GameStoreState>()(
                 ]
               : state.feedbacks,
             sim: isFront
-              ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
+              ? {
+                  ...state.sim,
+                  pose: 'idle',
+                  activeObjectId: null,
+                  activeProp: null,
+                  speechBubble: null,
+                }
               : state.sim,
           };
         });
@@ -1414,10 +2193,19 @@ export const useGameStore = create<GameStoreState>()(
             const levelDef = getCareerLevel(state.career.careerId, state.career.level);
             const { endTotalMinutes } = getShiftWindowForDay(levelDef, state.clock.day);
             const shiftEnd = Math.max(endTotalMinutes, state.clock.totalMinutes + 60);
+            const allObjects = getAllWorldObjects(state.placedObjects);
+            const allWalls = getAllWorldWalls(state.walls);
+            const nextNpcs = state.npcs.some((n) => n.knockingAtMayaDoor)
+              ? state.npcs.map((n) =>
+                  n.knockingAtMayaDoor ? sendNpcBackHomeState(n, allObjects, allWalls) : n,
+                )
+              : state.npcs;
 
             return {
               actionQueue: [],
               shiftPrompt: null,
+              doorbellPrompt: null,
+              npcs: nextNpcs,
               pieMenu: null,
               sim: {
                 ...state.sim,
@@ -1425,6 +2213,7 @@ export const useGameStore = create<GameStoreState>()(
                 pose: 'idle',
                 activeObjectId: null,
                 activeProp: null,
+                speechBubble: null,
               },
               activeShift: {
                 careerId: state.career.careerId,
@@ -1447,6 +2236,8 @@ export const useGameStore = create<GameStoreState>()(
               state.sim,
               state.placedObjects,
               state.walls,
+              state.unlockedHouseIds,
+              state.npcs,
             );
             return {
               actionQueue: nextQueue,
@@ -1461,6 +2252,8 @@ export const useGameStore = create<GameStoreState>()(
               state.sim,
               state.placedObjects,
               state.walls,
+              state.unlockedHouseIds,
+              state.npcs,
             );
             const facingAngle = front.facingAngle ?? state.sim.facingAngle;
             simRuntime.facingAngle = facingAngle;
@@ -1498,6 +2291,8 @@ export const useGameStore = create<GameStoreState>()(
                 state.sim,
                 state.placedObjects,
                 state.walls,
+                state.unlockedHouseIds,
+                state.npcs,
               );
               return {
                 actionQueue: nextQueue,
@@ -1514,11 +2309,113 @@ export const useGameStore = create<GameStoreState>()(
             });
           }
 
-          const facingAngle = front.facingAngle ?? state.sim.facingAngle;
+          let facingAngle = front.facingAngle ?? state.sim.facingAngle;
+          let nextNpcs = state.npcs;
+          let simBubble = state.sim.speechBubble ?? null;
+
+          // Knocking on a neighbor's front door sets Maya's knock speech bubble
+          if (front.kind === 'knock') {
+            simBubble = {
+              icon: 'knock',
+              expiresAtSimMinute: state.clock.totalMinutes + front.durationSimMinutes + 4,
+            };
+          }
+
+          // Face-to-face NPC socializing turns Maya & the NPC toward each other with expressive speech bubbles!
+          if (front.kind === 'social_npc' && front.targetNpcId) {
+            const targetNpc = state.npcs.find((n) => n.contactId === front.targetNpcId);
+            if (targetNpc) {
+              const tileDist = Math.hypot(
+                targetNpc.tileX - state.sim.tileX,
+                targetNpc.tileZ - state.sim.tileZ,
+              );
+              // If the strolling NPC moved far away while Maya walked over, pause them and walk right up!
+              if (tileDist > 2.6) {
+                const allObjects = getAllWorldObjects(state.placedObjects);
+                const allWalls = getAllWorldWalls(state.walls);
+                const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+                const stand = findAdjacentStandTile(
+                  { x: targetNpc.tileX, z: targetNpc.tileZ },
+                  { x: state.sim.tileX, z: state.sim.tileZ },
+                  allObjects,
+                  allWalls,
+                  lockedDoors,
+                );
+                const catchUpPath = stand
+                  ? findPath(
+                      { x: state.sim.tileX, z: state.sim.tileZ },
+                      stand.tile,
+                      allObjects,
+                      allWalls,
+                      lockedDoors,
+                    )
+                  : null;
+                if (stand && catchUpPath && catchUpPath.length > 0) {
+                  return {
+                    npcs: state.npcs.map((n) =>
+                      n.contactId === targetNpc.contactId
+                        ? {
+                            ...n,
+                            path: [],
+                            pathIndex: 0,
+                            pose: 'idle' as const,
+                            pendingGoal: 'idle' as const,
+                            busyUntilSimMinute: state.clock.totalMinutes + 18,
+                          }
+                        : n,
+                    ),
+                    actionQueue: [
+                      {
+                        ...front,
+                        targetTile: stand.tile,
+                        facingAngle: stand.facingAngle,
+                        phase: 'routing',
+                        path: catchUpPath,
+                        pathIndex: 0,
+                      },
+                      ...rest,
+                    ],
+                  };
+                }
+              }
+
+              const mayaWorld = tileToWorld(state.sim.tileX, state.sim.tileZ);
+              const npcWorld = tileToWorld(targetNpc.tileX, targetNpc.tileZ);
+              facingAngle = Math.atan2(npcWorld.x - mayaWorld.x, npcWorld.z - mayaWorld.z);
+              const npcFacingMaya = Math.atan2(mayaWorld.x - npcWorld.x, mayaWorld.z - npcWorld.z);
+              syncNpcRuntimeToTile(
+                targetNpc.contactId,
+                targetNpc.tileX,
+                targetNpc.tileZ,
+                npcFacingMaya,
+              );
+              const bubbleIcon = front.bubbleIcon ?? 'chat';
+              const bubbleExpiry = state.clock.totalMinutes + front.durationSimMinutes + 2;
+              simBubble = { icon: bubbleIcon, expiresAtSimMinute: bubbleExpiry };
+              nextNpcs = state.npcs.map((n) =>
+                n.contactId === targetNpc.contactId
+                  ? {
+                      ...n,
+                      facingAngle: npcFacingMaya,
+                      pose: 'talk',
+                      activeObjectId: null,
+                      activeProp: null,
+                      path: [],
+                      pathIndex: 0,
+                      talkingWithMaya: true,
+                      busyUntilSimMinute: bubbleExpiry,
+                      speechBubble: { icon: bubbleIcon, expiresAtSimMinute: bubbleExpiry },
+                    }
+                  : n,
+              );
+            }
+          }
+
           simRuntime.facingAngle = facingAngle;
 
           return {
             funds: nextFunds,
+            npcs: nextNpcs,
             feedbacks: nextFeedbacks.slice(-4),
             sim: {
               ...state.sim,
@@ -1526,6 +2423,7 @@ export const useGameStore = create<GameStoreState>()(
               pose: front.animationPose,
               activeObjectId: front.targetObjectId ?? null,
               activeProp: front.heldProp ?? null,
+              speechBubble: simBubble,
             },
             actionQueue: [
               {
@@ -1561,6 +2459,9 @@ export const useGameStore = create<GameStoreState>()(
           let nextFunds = state.funds;
           let nextContacts = state.contacts;
           let nextSocialFeed = state.socialFeed;
+          let nextUnlockedHouseIds = state.unlockedHouseIds;
+          let nextNpcs = state.npcs;
+          let nextDoorbellPrompt = state.doorbellPrompt;
           let nextCareer = state.career;
           let nextShiftPrompt = state.shiftPrompt;
           let nextActiveShift = state.activeShift;
@@ -1642,7 +2543,7 @@ export const useGameStore = create<GameStoreState>()(
             return promotedCareer;
           };
 
-          // Midnight rollover (new day): reset daily shift state & check low-funds safety net
+          // Midnight rollover (new day): reset daily shift state, re-lock empty neighbor houses & check safety net
           const prevDay = state.clock.day;
           if (day > prevDay) {
             if (!nextCareer && nextFunds < 100) {
@@ -1661,6 +2562,27 @@ export const useGameStore = create<GameStoreState>()(
             }
             if (nextShiftPrompt && nextShiftPrompt.day < day) {
               nextShiftPrompt = null;
+            }
+            const mayaCurrentHouse = getNeighborHouseContainingTile({
+              x: nextSim.tileX,
+              z: nextSim.tileZ,
+            });
+            nextUnlockedHouseIds = mayaCurrentHouse ? [mayaCurrentHouse.id] : [];
+
+            // Politely send home any late-night visitors at midnight
+            const hasLateVisitor = nextNpcs.some(
+              (n) => (n.visitingMaya || n.knockingAtMayaDoor) && !n.talkingWithMaya,
+            );
+            if (hasLateVisitor) {
+              const allObjects = getAllWorldObjects(state.placedObjects);
+              const allWalls = getAllWorldWalls(state.walls);
+              nextNpcs = nextNpcs.map((n) =>
+                (n.visitingMaya || n.knockingAtMayaDoor) && !n.talkingWithMaya
+                  ? sendNpcBackHomeState(n, allObjects, allWalls, newTotal + 12)
+                  : n,
+              );
+              nextDoorbellPrompt = null;
+              pushFeedback('Visitors headed home for the night', 'info');
             }
           }
 
@@ -1769,22 +2691,100 @@ export const useGameStore = create<GameStoreState>()(
                   ? { type: front.emotionBoost, expiresAtSimMinute: newTotal + 180 }
                   : nextSim.emotionBoost;
 
-                // Social Contact relationship gain & Social Bunny post
-                if (front.contactId && front.relationshipDelta) {
+                // Neighbor Front-Door Knock completion -> Resident greets Maya & invites her inside!
+                if (front.kind === 'knock' && front.targetHouseId) {
+                  const house = NEIGHBOR_HOUSES_BY_ID[front.targetHouseId];
+                  if (house) {
+                    const houseResidents = nextContacts.filter((c) =>
+                      house.residentIds.includes(c.id),
+                    );
+                    const greeterContact = houseResidents[0];
+                    const isLateNight = hour >= 23 || hour < 6;
+                    const hasGoodFriend = houseResidents.some((c) => c.relationship >= 65);
+
+                    if (isLateNight && !hasGoodFriend) {
+                      pushFeedback(
+                        `It’s late! ${greeterContact?.name.split(' ')[0] ?? 'Neighbors'} asks to visit in the morning.`,
+                        'info',
+                      );
+                    } else {
+                      if (!nextUnlockedHouseIds.includes(house.id)) {
+                        nextUnlockedHouseIds = [...nextUnlockedHouseIds, house.id];
+                      }
+                      const greeterName = greeterContact?.name.split(' ')[0] ?? 'Neighbor';
+                      pushFeedback(`${greeterName}: "Come on in, Maya!"`, 'positive');
+
+                      // Route the first resident to their greet tile facing Maya with a wave bubble!
+                      if (greeterContact) {
+                        const greeterNpc = nextNpcs.find((n) => n.contactId === greeterContact.id);
+                        if (greeterNpc) {
+                          const allObjects = getAllWorldObjects(state.placedObjects);
+                          const allWalls = getAllWorldWalls(state.walls);
+                          const lockedForNpc = getLockedDoorWallIdsForNpc(greeterNpc);
+                          const greetPath =
+                            findPath(
+                              { x: greeterNpc.tileX, z: greeterNpc.tileZ },
+                              house.greetTile,
+                              allObjects,
+                              allWalls,
+                              lockedForNpc,
+                            ) ?? [];
+                          const greetFacing =
+                            house.knockFacingAngle === Math.PI ? 0 : Math.PI;
+                          nextNpcs = nextNpcs.map((n) =>
+                            n.contactId === greeterContact.id
+                              ? {
+                                  ...n,
+                                  pose: greetPath.length > 0 ? 'walk' : 'idle',
+                                  activeObjectId: null,
+                                  activeProp: null,
+                                  path: greetPath,
+                                  pathIndex: 0,
+                                  pendingGoal: 'greet_maya',
+                                  pendingFacingAngle: greetFacing,
+                                  facingAngle: greetPath.length === 0 ? greetFacing : n.facingAngle,
+                                  busyUntilSimMinute: newTotal + 22,
+                                  speechBubble: {
+                                    icon: 'wave',
+                                    expiresAtSimMinute: newTotal + 18,
+                                  },
+                                }
+                              : n,
+                          );
+                        }
+                      }
+                      nextSim = {
+                        ...nextSim,
+                        speechBubble: { icon: 'wave', expiresAtSimMinute: newTotal + 14 },
+                      };
+                    }
+                  }
+                }
+
+                // Social Contact friendship & romance gain + Social Bunny post
+                if (front.contactId && (front.relationshipDelta || front.romanceDelta)) {
                   const targetContact = nextContacts.find((c) => c.id === front.contactId);
                   if (targetContact) {
-                    const updatedRel = clampRelationship(
-                      targetContact.relationship + front.relationshipDelta,
-                    );
+                    const fDelta = front.relationshipDelta ?? 0;
+                    const rDelta = front.romanceDelta ?? 0;
+                    const updatedRel = clampRelationship(targetContact.relationship + fDelta);
+                    const updatedRom = clampRelationship((targetContact.romance ?? 0) + rDelta);
                     nextContacts = nextContacts.map((c) =>
                       c.id === front.contactId
-                        ? { ...c, relationship: updatedRel, lastInteractedDay: day }
+                        ? {
+                            ...c,
+                            relationship: updatedRel,
+                            romance: updatedRom,
+                            lastInteractedDay: day,
+                          }
                         : c,
                     );
-                    pushFeedback(
-                      `+${front.relationshipDelta} Friendship with ${targetContact.name.split(' ')[0]}`,
-                      'positive',
-                    );
+                    const firstName = targetContact.name.split(' ')[0];
+                    if (rDelta > 0) {
+                      pushFeedback(`+${rDelta} Romance & +${fDelta} Friendship with ${firstName}!`, 'positive');
+                    } else {
+                      pushFeedback(`+${fDelta} Friendship with ${firstName}`, 'positive');
+                    }
                     if (front.socialPostText) {
                       const post = createSocialPost({
                         id: nextId('post'),
@@ -1797,6 +2797,20 @@ export const useGameStore = create<GameStoreState>()(
                       nextSocialFeed = [post, ...nextSocialFeed].slice(0, 18);
                     }
                   }
+                }
+
+                // Release face-to-face NPC partner back to normal state
+                if (front.kind === 'social_npc' && front.targetNpcId) {
+                  nextNpcs = nextNpcs.map((n) =>
+                    n.contactId === front.targetNpcId
+                      ? {
+                          ...n,
+                          talkingWithMaya: false,
+                          pose: 'idle',
+                          busyUntilSimMinute: newTotal + 14,
+                        }
+                      : n,
+                  );
                 }
 
                 // Zoomers Delivery completion toast & post
@@ -1902,6 +2916,8 @@ export const useGameStore = create<GameStoreState>()(
                   nextSim,
                   state.placedObjects,
                   state.walls,
+                  nextUnlockedHouseIds,
+                  nextNpcs,
                 );
                 nextQueue = preparedNext;
                 nextSim = {
@@ -1971,6 +2987,7 @@ export const useGameStore = create<GameStoreState>()(
                     state.placedObjects,
                     state.walls,
                     careerDef.name,
+                    nextUnlockedHouseIds,
                   );
                   nextShiftPrompt = null;
                   nextCareer = {
@@ -1991,6 +3008,16 @@ export const useGameStore = create<GameStoreState>()(
                     pushFeedback(`Time for work! Heading to ${careerDef.name}`, 'info');
                   } else {
                     // Direct off-lot fallback if doorway is blocked
+                    const allObjects = getAllWorldObjects(state.placedObjects);
+                    const allWalls = getAllWorldWalls(state.walls);
+                    if (nextNpcs.some((n) => n.knockingAtMayaDoor)) {
+                      nextNpcs = nextNpcs.map((n) =>
+                        n.knockingAtMayaDoor
+                          ? sendNpcBackHomeState(n, allObjects, allWalls)
+                          : n,
+                      );
+                    }
+                    nextDoorbellPrompt = null;
                     nextQueue = [];
                     nextSim = {
                       ...nextSim,
@@ -2017,6 +3044,18 @@ export const useGameStore = create<GameStoreState>()(
             }
           }
 
+          // Clear expired speech bubbles on Maya & NPCs
+          if (nextSim.speechBubble && newTotal >= nextSim.speechBubble.expiresAtSimMinute) {
+            nextSim = { ...nextSim, speechBubble: null };
+          }
+          if (nextNpcs.some((n) => n.speechBubble && newTotal >= n.speechBubble.expiresAtSimMinute)) {
+            nextNpcs = nextNpcs.map((n) =>
+              n.speechBubble && newTotal >= n.speechBubble.expiresAtSimMinute
+                ? { ...n, speechBubble: null }
+                : n,
+            );
+          }
+
           const nextEmotion = computeEmotion(nextNeeds, nextSim.emotionBoost, newTotal);
 
           return {
@@ -2029,6 +3068,9 @@ export const useGameStore = create<GameStoreState>()(
             idleSimMinutes: nextIdle,
             contacts: nextContacts,
             socialFeed: nextSocialFeed,
+            unlockedHouseIds: nextUnlockedHouseIds,
+            npcs: nextNpcs,
+            doorbellPrompt: nextDoorbellPrompt,
             career: nextCareer,
             shiftPrompt: nextShiftPrompt,
             activeShift: nextActiveShift,
@@ -2064,6 +3106,12 @@ export const useGameStore = create<GameStoreState>()(
           state.placedObjects,
           state.walls,
           state.funds,
+          undefined,
+          {
+            allObjects: getAllWorldObjects(state.placedObjects),
+            allWalls: getAllWorldWalls(state.walls),
+            lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+          },
         );
         if (!choice) {
           set({ idleSimMinutes: 0 });
@@ -2231,6 +3279,14 @@ export const useGameStore = create<GameStoreState>()(
           return false;
         }
 
+        const occupiedSet = item.walkable
+          ? new Set<string>()
+          : new Set(
+              getOccupiedTiles(sel.tileX, sel.tileZ, item.footprint, sel.rotation).map(
+                (t) => `${t.x},${t.z}`,
+              ),
+            );
+
         if (sel.mode === 'place_new') {
           if (state.funds < item.price) {
             state.addFeedback(`Need §${item.price} Simoleons`, 'negative');
@@ -2245,9 +3301,30 @@ export const useGameStore = create<GameStoreState>()(
             rotation: sel.rotation,
           };
 
+          // Safely nudge any visiting NPC standing on the newly occupied solid tile
+          const nextNpcs = state.npcs.map((n) => {
+            if (occupiedSet.has(`${n.tileX},${n.tileZ}`)) {
+              syncNpcRuntimeToTile(n.contactId, MAYA_WELCOME_TILE.x, MAYA_WELCOME_TILE.z, 0);
+              return {
+                ...n,
+                tileX: MAYA_WELCOME_TILE.x,
+                tileZ: MAYA_WELCOME_TILE.z,
+                pose: 'idle' as const,
+                activeObjectId: null,
+                activeProp: null,
+                path: [],
+                pathIndex: 0,
+                pendingGoal: 'idle' as const,
+                pendingObjectId: null,
+              };
+            }
+            return n;
+          });
+
           set({
             funds: state.funds - item.price,
             placedObjects: [...state.placedObjects, newObj],
+            npcs: nextNpcs,
             buildSelection: null,
             feedbacks: [
               ...state.feedbacks.slice(-3),
@@ -2275,16 +3352,44 @@ export const useGameStore = create<GameStoreState>()(
         const nextSim = wasUsingMoved
           ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
+        const nextNpcs = state.npcs.map((n) => {
+          const affectedByMove =
+            n.activeObjectId === sel.movingInstanceId ||
+            n.pendingObjectId === sel.movingInstanceId ||
+            occupiedSet.has(`${n.tileX},${n.tileZ}`);
+          if (!affectedByMove) return n;
+          const needsNudge = occupiedSet.has(`${n.tileX},${n.tileZ}`);
+          const nextX = needsNudge ? MAYA_WELCOME_TILE.x : n.tileX;
+          const nextZ = needsNudge ? MAYA_WELCOME_TILE.z : n.tileZ;
+          if (needsNudge) {
+            syncNpcRuntimeToTile(n.contactId, nextX, nextZ, 0);
+          }
+          return {
+            ...n,
+            tileX: nextX,
+            tileZ: nextZ,
+            pose: 'idle' as const,
+            activeObjectId: null,
+            activeProp: null,
+            path: [],
+            pathIndex: 0,
+            pendingGoal: 'idle' as const,
+            pendingObjectId: null,
+          };
+        });
         const nextQueue = preparePathForFrontAction(
           filteredQueue,
           nextSim,
           movedObjects,
           state.walls,
+          state.unlockedHouseIds,
+          nextNpcs,
         );
 
         set({
           placedObjects: movedObjects,
           sim: nextSim,
+          npcs: nextNpcs,
           actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
@@ -2315,6 +3420,20 @@ export const useGameStore = create<GameStoreState>()(
         const nextSim = wasUsingSold
           ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
           : state.sim;
+        const nextNpcs = state.npcs.map((n) =>
+          n.activeObjectId === sel.movingInstanceId || n.pendingObjectId === sel.movingInstanceId
+            ? {
+                ...n,
+                pose: 'idle' as const,
+                activeObjectId: null,
+                activeProp: null,
+                path: [],
+                pathIndex: 0,
+                pendingGoal: 'idle' as const,
+                pendingObjectId: null,
+              }
+            : n,
+        );
         const remainingQueue = state.actionQueue.filter(
           (a) => a.targetObjectId !== sel.movingInstanceId,
         );
@@ -2323,12 +3442,15 @@ export const useGameStore = create<GameStoreState>()(
           nextSim,
           remainingObjects,
           state.walls,
+          state.unlockedHouseIds,
+          nextNpcs,
         );
 
         set({
           funds: state.funds + refund,
           placedObjects: remainingObjects,
           sim: nextSim,
+          npcs: nextNpcs,
           actionQueue: nextQueue,
           buildSelection: null,
           feedbacks: [
@@ -2348,7 +3470,10 @@ export const useGameStore = create<GameStoreState>()(
 
       resetStarterLot: () => {
         const initialSim = createInitialSim();
+        const freshContacts = createInitialContacts();
+        const freshNpcs = createInitialNpcWorldStates(freshContacts);
         syncRuntimeToTile(initialSim.tileX, initialSim.tileZ, initialSim.facingAngle);
+        syncAllNpcsRuntime(freshNpcs);
         set({
           mode: 'live',
           wallMode: 'cutaway',
@@ -2357,8 +3482,11 @@ export const useGameStore = create<GameStoreState>()(
           phoneApp: 'home',
           phoneCaseId: 'coastal_mint',
           phoneHasBadge: false,
-          contacts: createInitialContacts(),
+          contacts: freshContacts,
           socialFeed: createInitialSocialFeed(),
+          unlockedHouseIds: [],
+          npcs: freshNpcs,
+          doorbellPrompt: null,
           career: null,
           shiftPrompt: null,
           activeShift: null,
@@ -2409,6 +3537,7 @@ export const useGameStore = create<GameStoreState>()(
         phoneCaseId: state.phoneCaseId,
         contacts: state.contacts,
         socialFeed: state.socialFeed,
+        unlockedHouseIds: state.unlockedHouseIds,
         career: state.career,
         sim: {
           ...state.sim,
@@ -2416,6 +3545,7 @@ export const useGameStore = create<GameStoreState>()(
           activeObjectId: null,
           activeProp: null,
           awayAtWork: false,
+          speechBubble: null,
         },
         placedObjects: state.placedObjects,
       }),
@@ -2427,12 +3557,34 @@ export const useGameStore = create<GameStoreState>()(
         if (!state.phoneCaseId) {
           state.phoneCaseId = 'coastal_mint';
         }
+        const defaultContacts = createInitialContacts();
         if (!Array.isArray(state.contacts) || state.contacts.length === 0) {
-          state.contacts = createInitialContacts();
+          state.contacts = defaultContacts;
+        } else {
+          // Backfill romance, homeHouseId, and full 3D appearance onto saved contacts
+          const defaultById = Object.fromEntries(defaultContacts.map((c) => [c.id, c]));
+          state.contacts = state.contacts.map((c) => {
+            const def = defaultById[c.id];
+            if (!def) return c;
+            return {
+              ...def,
+              ...c,
+              romance: typeof c.romance === 'number' ? c.romance : 0,
+              homeHouseId: c.homeHouseId ?? def.homeHouseId,
+              appearance: c.appearance ?? { ...def.appearance },
+            };
+          });
         }
         if (!Array.isArray(state.socialFeed) || state.socialFeed.length === 0) {
           state.socialFeed = createInitialSocialFeed();
         }
+        if (!Array.isArray(state.unlockedHouseIds)) {
+          state.unlockedHouseIds = [];
+        }
+        state.npcs = createInitialNpcWorldStates(state.contacts);
+        syncAllNpcsRuntime(state.npcs);
+        state.doorbellPrompt = null;
+
         if (state.career === undefined) {
           state.career = null;
         }
@@ -2446,6 +3598,16 @@ export const useGameStore = create<GameStoreState>()(
           }
           state.sim.activeProp = null;
           state.sim.awayAtWork = false;
+          state.sim.speechBubble = null;
+
+          // If Maya saved while visiting a neighbor house, keep that house unlocked so she isn't trapped
+          const currentHouse = getNeighborHouseContainingTile({
+            x: state.sim.tileX,
+            z: state.sim.tileZ,
+          });
+          if (currentHouse && !state.unlockedHouseIds.includes(currentHouse.id)) {
+            state.unlockedHouseIds = [...state.unlockedHouseIds, currentHouse.id];
+          }
 
           // Backfill Bedroom Dresser & Arch Mirror if missing and their tiles are unobstructed
           const hasDresser = state.placedObjects.some((o) => o.catalogId === 'oak_dresser');

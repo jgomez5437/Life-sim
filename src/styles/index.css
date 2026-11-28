@@ -673,6 +673,17 @@ button:disabled {
   line-height: 1.2;
 }
 
+.pie-hub-sub {
+  margin-top: 2px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--ink-muted);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .pie-petal {
   position: absolute;
   left: 50%;
@@ -2697,10 +2708,200 @@ button:disabled {
   width: 100%;
 }
 
+/* ======================== NEIGHBORHOOD, ROMANCE & DOORBELL ======================== */
+.contact-location-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.contact-status-dot {
+  font-size: 9.5px;
+  font-weight: 700;
+  color: var(--teal);
+  white-space: nowrap;
+}
+
+.romance-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.romance-track {
+  flex: 1 1 auto;
+  margin-top: 0;
+  background: hsla(340, 68%, 55%, 0.14);
+}
+
+.romance-tier-label {
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.contact-world-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.contact-world-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 800;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.contact-world-btn.invite {
+  background: linear-gradient(135deg, #27b377, #1d8f68);
+  color: #fff;
+}
+
+.contact-world-btn.visit {
+  background: linear-gradient(135deg, #3b89b8, #2c6d99);
+  color: #fff;
+}
+
+.contact-world-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.contact-world-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.doorbell-banner {
+  position: absolute;
+  top: calc(var(--safe-top) + 64px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 8px 9px;
+  border-radius: 18px;
+  background: var(--surface-glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid hsla(156, 58%, 42%, 0.28);
+  box-shadow: 0 12px 28px -8px rgba(15, 25, 34, 0.28);
+  z-index: 36;
+  max-width: min(410px, 90vw);
+  animation: doorbell-pop 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes doorbell-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+.doorbell-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  color: #fff;
+  font-weight: 800;
+  font-size: 12px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.doorbell-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.doorbell-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--emerald);
+}
+
+.doorbell-title {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--ink-primary);
+  white-space: nowrap;
+}
+
+.doorbell-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+}
+
+.doorbell-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.doorbell-btn.primary {
+  background: var(--emerald);
+  color: #fff;
+  box-shadow: 0 3px 8px hsla(156, 68%, 35%, 0.28);
+}
+
+.doorbell-btn.secondary {
+  background: hsla(212, 18%, 22%, 0.09);
+  color: var(--ink-secondary);
+}
+
 /* Compact mobile landscape tuning (e.g. iPhone/Android 390px height) */
 @media (max-height: 450px) {
   .brand-sub {
     display: none;
+  }
+
+  .doorbell-banner {
+    top: calc(var(--safe-top) + 46px);
+    padding: 6px 9px 6px 7px;
+    gap: 8px;
+  }
+
+  .doorbell-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 11px;
+  }
+
+  .doorbell-title {
+    font-size: 11.5px;
+  }
+
+  .doorbell-btn {
+    padding: 4px 8px;
+    font-size: 10px;
   }
 
   .phone-dock-btn {

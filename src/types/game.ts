@@ -26,7 +26,16 @@ export type CatalogCategory =
   | 'surfaces'
   | 'decor';
 
-export type AnimationPose = 'idle' | 'walk' | 'stand_use' | 'sit' | 'sleep' | 'eat' | 'wash' | 'phone';
+export type AnimationPose =
+  | 'idle'
+  | 'walk'
+  | 'stand_use'
+  | 'sit'
+  | 'sleep'
+  | 'eat'
+  | 'wash'
+  | 'phone'
+  | 'talk';
 
 export interface InteractionOption {
   id: string;
@@ -86,6 +95,8 @@ export interface PlacedObject {
   tileX: number;
   tileZ: number;
   rotation: RotationDeg;
+  /** Present on static neighbor-house furniture (non-editable in Build & Buy). */
+  houseId?: NeighborHouseId;
 }
 
 export interface TileCoord {
@@ -101,6 +112,8 @@ export interface WallSegment {
   z: number;
   kind: 'solid' | 'window' | 'door';
   side: 'north' | 'south' | 'west' | 'east' | 'interior';
+  /** Present on neighbor house walls/doors. */
+  houseId?: NeighborHouseId;
 }
 
 export interface RoomDef {
@@ -113,13 +126,22 @@ export interface RoomDef {
   floorType: 'wood_warm' | 'wood_light' | 'tile_kitchen' | 'tile_bath' | 'stone_patio';
 }
 
+export type SpeechBubbleIcon = 'chat' | 'laugh' | 'heart' | 'sparkle' | 'wave' | 'knock' | 'coffee';
+
+export interface ActiveSpeechBubble {
+  icon: SpeechBubbleIcon;
+  expiresAtSimMinute: number;
+}
+
 export interface ActionQueueItem {
   id: string;
-  kind: 'walk' | 'object' | 'self' | 'commute';
+  kind: 'walk' | 'object' | 'self' | 'commute' | 'knock' | 'social_npc';
   label: string;
   icon: string;
   targetObjectId?: string;
   interactionId?: string;
+  targetHouseId?: NeighborHouseId;
+  targetNpcId?: string;
   targetTile: TileCoord;
   facingAngle?: number;
   durationSimMinutes: number;
@@ -133,6 +155,8 @@ export interface ActionQueueItem {
   heldProp?: HeldPropType;
   contactId?: string;
   relationshipDelta?: number;
+  romanceDelta?: number;
+  bubbleIcon?: SpeechBubbleIcon;
   socialPostText?: string;
   deliveryItemId?: string;
   phase: 'routing' | 'performing';
@@ -174,6 +198,7 @@ export interface SimState {
   activeObjectId: string | null;
   activeProp: HeldPropType | null;
   awayAtWork: boolean;
+  speechBubble?: ActiveSpeechBubble | null;
 }
 
 export interface GameClock {
@@ -184,13 +209,15 @@ export interface GameClock {
 }
 
 export interface PieMenuTarget {
-  kind: 'floor' | 'object' | 'sim';
+  kind: 'floor' | 'object' | 'sim' | 'npc' | 'house';
   title: string;
   subtitle?: string;
   screenX: number;
   screenY: number;
   worldPos: [number, number, number];
   objectId?: string;
+  npcId?: string;
+  houseId?: NeighborHouseId;
   tile: TileCoord;
   options: Array<{
     id: string;
@@ -243,6 +270,7 @@ export interface PhoneCaseStyle {
 }
 
 export type RelationshipTier = 'acquaintance' | 'friend' | 'good_friend' | 'best_friend';
+export type RomanceTier = 'none' | 'crush' | 'romantic_interest' | 'partner';
 
 export interface NpcContact {
   id: string;
@@ -254,6 +282,9 @@ export interface NpcContact {
   hairColor: string;
   skinColor: string;
   relationship: number;
+  romance: number;
+  homeHouseId: NeighborHouseId;
+  appearance: SimAppearance;
   lastInteractedDay: number;
 }
 
@@ -414,4 +445,83 @@ export interface PromotionSummary {
   bonus: number;
   dailyTaskLabel: string;
 }
+
+/* ======================== NEIGHBORHOOD & LIVE NPC TYPES ======================== */
+
+export type NeighborHouseId = 'sagewood_cottage' | 'breezeview_loft' | 'atelier_sunbeam';
+
+export interface TileRect {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+}
+
+export interface NeighborHouseDef {
+  id: NeighborHouseId;
+  name: string;
+  subtitle: string;
+  directionLabel: string;
+  roofColor: string;
+  exteriorColor: string;
+  doorColor: string;
+  residentIds: string[];
+  lotRect: TileRect;
+  houseRect: TileRect;
+  frontDoorWallId: string;
+  /** Exterior tile right outside the front door where Maya stands to knock. */
+  knockTile: TileCoord;
+  /** Interior tile right inside the front door where a resident greets Maya. */
+  greetTile: TileCoord;
+  /** Facing angle for Maya looking toward the front door when knocking. */
+  knockFacingAngle: number;
+  /** Roof ridge axis ('x' = ridge runs East-West). */
+  roofRidgeAxis: 'x' | 'z';
+  rooms: RoomDef[];
+  walls: WallSegment[];
+  objects: PlacedObject[];
+}
+
+export interface FaceToFaceSocialDef {
+  id: string;
+  label: string;
+  icon: string;
+  durationSimMinutes: number;
+  friendshipDelta: number;
+  romanceDelta: number;
+  needDeltas: Partial<Record<NeedKey, number>>;
+  emotionBoost?: EmotionType;
+  bubbleIcon: SpeechBubbleIcon;
+  postTemplate: (contactName: string) => string;
+}
+
+export interface NpcWorldState {
+  contactId: string;
+  homeHouseId: NeighborHouseId;
+  tileX: number;
+  tileZ: number;
+  facingAngle: number;
+  pose: AnimationPose;
+  activeObjectId: string | null;
+  activeProp: HeldPropType | null;
+  visitingMaya: boolean;
+  knockingAtMayaDoor: boolean;
+  talkingWithMaya: boolean;
+  path: TileCoord[];
+  pathIndex: number;
+  /** Pending pose/object/arrival action when the NPC reaches the end of `path`. */
+  pendingGoal: 'idle' | 'visit_maya_door' | 'enter_maya_home' | 'return_home' | 'greet_maya' | 'use_object';
+  pendingObjectId?: string | null;
+  pendingPose?: AnimationPose;
+  pendingProp?: HeldPropType | null;
+  pendingFacingAngle?: number;
+  busyUntilSimMinute: number;
+  speechBubble: ActiveSpeechBubble | null;
+}
+
+export interface DoorbellPromptState {
+  contactId: string;
+  message: string;
+}
+
 

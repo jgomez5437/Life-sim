@@ -128,29 +128,29 @@ export function LightingSky() {
   return (
     <>
       <color attach="background" args={[lighting.skyHex]} />
-      <fog attach="fog" args={[lighting.skyHex, 26, 58]} />
+      <fog attach="fog" args={[lighting.skyHex, 44, 108]} />
 
       <hemisphereLight
         args={[lighting.skyHex, '#7ca26c', lighting.ambientIntensity]}
       />
 
-      {/* Primary sunlit directional shadow caster */}
+      {/* Primary sunlit directional shadow caster covering Sunnyside neighborhood */}
       <directionalLight
         key={shadowMapSize}
-        position={lighting.sunPos}
+        position={[lighting.sunPos[0] + 3, lighting.sunPos[1] + 5, lighting.sunPos[2] + 6]}
         intensity={lighting.sunIntensity}
         color={lighting.sunColor}
         castShadow
         shadow-mapSize-width={shadowMapSize}
         shadow-mapSize-height={shadowMapSize}
         shadow-camera-near={1}
-        shadow-camera-far={46}
-        shadow-camera-left={-12.5}
-        shadow-camera-right={12.5}
-        shadow-camera-top={12.5}
-        shadow-camera-bottom={-12.5}
-        shadow-bias={-0.00045}
-        shadow-normalBias={0.025}
+        shadow-camera-far={82}
+        shadow-camera-left={-28}
+        shadow-camera-right={28}
+        shadow-camera-top={26}
+        shadow-camera-bottom={-26}
+        shadow-bias={-0.0005}
+        shadow-normalBias={0.03}
       />
 
       {/* Soft opposite-side sky bounce fill so shaded faces stay vibrant like Sims 4 */}

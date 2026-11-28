@@ -10,6 +10,8 @@ export interface SimRuntimeState {
   cameraAzimuth: number;
   /** Set to trigger smooth camera focus onto Sim's current world position. */
   focusSimRequested: boolean;
+  /** Optional world-space point to smoothly pan camera toward (e.g., Visit Neighbor House). */
+  focusWorldTarget: { x: number; z: number } | null;
   /** Temporary ground ripple feedback when tapping to walk. */
   walkRipple: { x: number; z: number; startedAt: number } | null;
 }
@@ -27,6 +29,7 @@ export const simRuntime: SimRuntimeState = {
   isMoving: false,
   cameraAzimuth: Math.PI * 0.25,
   focusSimRequested: false,
+  focusWorldTarget: null,
   walkRipple: null,
 };
 

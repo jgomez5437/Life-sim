@@ -5,6 +5,7 @@ import { BuildGridOverlay } from './BuildGridOverlay';
 import { CameraRig } from './CameraRig';
 import { LightingSky } from './LightingSky';
 import { LotRenderer } from './LotRenderer';
+import { NpcCharacters } from './NpcCharacters';
 import { SimCharacter } from './SimCharacter';
 import { SimulationDriver } from './SimulationDriver';
 
@@ -17,7 +18,7 @@ export function GameCanvas() {
       <Canvas
         shadows
         dpr={dpr}
-        camera={{ fov: 39, near: 0.2, far: 130, position: [9, 10, 10] }}
+        camera={{ fov: 39, near: 0.2, far: 165, position: [9, 10, 10] }}
         gl={{
           antialias: true,
           powerPreference: 'high-performance',
@@ -31,6 +32,7 @@ export function GameCanvas() {
         <LotRenderer />
         <BuildGridOverlay />
         <SimCharacter />
+        <NpcCharacters />
       </Canvas>
     </div>
   );
