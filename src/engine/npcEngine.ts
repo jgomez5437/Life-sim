@@ -9,6 +9,7 @@ import {
 import type {
   AnimationPose,
   HeldPropType,
+  HouseholdBillsState,
   NeighborHouseId,
   NpcContact,
   NpcWorldState,
@@ -17,6 +18,7 @@ import type {
   WallSegment,
 } from '../types/game';
 import { getBestInteractionSlot } from './grid';
+import { isObjectBlockedByUtility } from './household';
 import { findPath } from './pathfinding';
 
 /** Default cozy interior spawn tiles inside each neighbor's home. */
@@ -113,6 +115,7 @@ export function pickNextNpcAutonomyPlan(
   mayaObjects: PlacedObject[],
   hour: number,
   seed: number,
+  bills?: HouseholdBillsState,
 ): NpcAutonomyPlan | null {
   const startTile = { x: npc.tileX, z: npc.tileZ };
   const lockedForNpc = getLockedDoorWallIdsForNpc(npc);
@@ -133,6 +136,8 @@ export function pickNextNpcAutonomyPlan(
   // If visiting Maya's home, mingle in Maya's living/kitchen area or sit on Maya's sofa
   if (npc.visitingMaya) {
     const guestObjects = mayaObjects.filter((o) => {
+      if (o.isBroken) return false;
+      if (bills && isObjectBlockedByUtility(o, bills).blocked) return false;
       const cat = CATALOG_BY_ID[o.catalogId];
       return (
         cat &&

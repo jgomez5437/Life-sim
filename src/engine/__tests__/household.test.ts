@@ -260,4 +260,37 @@ describe('household bills, utility shutoffs, wear, Handiness, and upgrades', () 
     }));
     expect(useGameStore.getState().enqueueObjectInteraction('sc_tv', 'watch_comedy')).toBe(true);
   });
+
+  it('cleans stale queued actions when services/phone settle them and prevents visiting NPCs from using broken or powerless home items', () => {
+    const tv = useGameStore
+      .getState()
+      .placedObjects.find((o) => o.catalogId === 'widescreen_tv')!;
+
+    // 1. Queue Maya to repair broken TV, then call Repair Tech -> stale repair action is removed
+    useGameStore.setState((s) => ({
+      placedObjects: s.placedObjects.map((o) =>
+        o.instanceId === tv.instanceId ? { ...o, isBroken: true, durability: 0 } : o,
+      ),
+    }));
+    expect(useGameStore.getState().enqueueRepairObject(tv.instanceId)).toBe(true);
+    expect(useGameStore.getState().actionQueue[0].kind).toBe('repair');
+    expect(useGameStore.getState().callRepairTech()).toBe(true);
+    expect(useGameStore.getState().actionQueue.length).toBe(0);
+
+    // 2. Queue Maya to pay bills at the 3D Mailbox, complete it -> restores shutoff utilities & posts to Social Bunny
+    const beforeFeed = useGameStore.getState().socialFeed.length;
+    useGameStore.setState((s) => ({
+      bills: { ...s.bills, amountDue: 180, powerShutoff: true, waterShutoff: true },
+    }));
+    expect(useGameStore.getState().enqueuePayBillsAtMailbox()).toBe(true);
+    expect(useGameStore.getState().actionQueue[0].kind).toBe('pay_bills');
+    useGameStore.getState().beginPerformingActiveAction();
+    useGameStore.getState().tickSimMinutes(10);
+
+    const afterMailbox = useGameStore.getState();
+    expect(afterMailbox.bills.amountDue).toBe(0);
+    expect(afterMailbox.bills.powerShutoff).toBe(false);
+    expect(afterMailbox.bills.waterShutoff).toBe(false);
+    expect(afterMailbox.socialFeed.length).toBeGreaterThan(beforeFeed);
+  });
 });

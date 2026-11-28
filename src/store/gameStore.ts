@@ -309,6 +309,8 @@ function preparePathForFrontAction(
   walls: WallSegment[],
   unlockedHouseIds: NeighborHouseId[] = [],
   npcs: NpcWorldState[] = [],
+  messes?: HouseholdMess[],
+  bills?: HouseholdBillsState,
 ): ActionQueueItem[] {
   let remaining = queue;
   const simTile = { x: sim.tileX, z: sim.tileZ };
@@ -348,6 +350,18 @@ function preparePathForFrontAction(
         remaining = rest;
         continue;
       }
+      if (front.kind === 'repair' && !obj.isBroken) {
+        remaining = rest;
+        continue;
+      }
+      if (
+        front.kind === 'object' &&
+        !obj.houseId &&
+        (obj.isBroken || (bills && isObjectBlockedByUtility(obj, bills).blocked))
+      ) {
+        remaining = rest;
+        continue;
+      }
       const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, simTile, lockedDoors);
       if (!slot) {
         remaining = rest;
@@ -355,7 +369,16 @@ function preparePathForFrontAction(
       }
       targetTile = slot.tile;
       facingAngle = slot.facingAngle;
+    } else if (front.kind === 'clean_mess') {
+      if (messes && front.targetMessId && !messes.some((m) => m.id === front.targetMessId)) {
+        remaining = rest;
+        continue;
+      }
     } else if (front.kind === 'pay_bills') {
+      if (bills && bills.amountDue <= 0) {
+        remaining = rest;
+        continue;
+      }
       targetTile = MAILBOX_STAND_TILE;
       facingAngle = 0;
     } else if (front.kind === 'social_npc' && front.targetNpcId) {
@@ -1131,6 +1154,7 @@ export const useGameStore = create<GameStoreState>()(
             state.placedObjects,
             state.clock.hour,
             seed,
+            state.bills,
           );
           if (!plan) {
             changed = true;
@@ -1359,18 +1383,38 @@ export const useGameStore = create<GameStoreState>()(
             ].slice(0, 18)
           : state.socialFeed;
 
+        const filteredQueue = state.actionQueue.filter((a) => a.kind !== 'pay_bills');
+        const wasPayingAtMailbox = state.actionQueue[0]?.kind === 'pay_bills';
+        const nextBillsState: HouseholdBillsState = {
+          ...state.bills,
+          amountDue: 0,
+          issuedOnDay: null,
+          dueTotalMinutes: null,
+          waterShutoffTotalMinutes: null,
+          powerShutoff: false,
+          waterShutoff: false,
+          totalBillsPaid: state.bills.totalBillsPaid + paid,
+        };
+        const nextQueue = wasPayingAtMailbox
+          ? preparePathForFrontAction(
+              filteredQueue,
+              state.sim,
+              state.placedObjects,
+              state.walls,
+              state.unlockedHouseIds,
+              state.npcs,
+              state.messes,
+              nextBillsState,
+            )
+          : filteredQueue;
+
         set({
           funds: state.funds - paid,
-          bills: {
-            ...state.bills,
-            amountDue: 0,
-            issuedOnDay: null,
-            dueTotalMinutes: null,
-            waterShutoffTotalMinutes: null,
-            powerShutoff: false,
-            waterShutoff: false,
-            totalBillsPaid: state.bills.totalBillsPaid + paid,
-          },
+          bills: nextBillsState,
+          actionQueue: nextQueue,
+          sim: wasPayingAtMailbox
+            ? { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null }
+            : state.sim,
           socialFeed: nextSocialFeed,
           pieMenu: null,
           feedbacks: [
@@ -1744,7 +1788,34 @@ export const useGameStore = create<GameStoreState>()(
             ? { ...o, isBroken: false, durability: 100 }
             : o,
         );
+        const removedPuddleIds = new Set(
+          state.messes.filter((m) => m.kind === 'puddle').map((m) => m.id),
+        );
         const remainingMesses = state.messes.filter((m) => m.kind !== 'puddle');
+        const wasRepairingFront =
+          state.actionQueue[0]?.kind === 'repair' ||
+          (state.actionQueue[0]?.kind === 'clean_mess' &&
+            Boolean(state.actionQueue[0]?.targetMessId && removedPuddleIds.has(state.actionQueue[0].targetMessId)));
+        const filteredQueue = state.actionQueue.filter(
+          (a) =>
+            a.kind !== 'repair' &&
+            !(a.kind === 'clean_mess' && a.targetMessId && removedPuddleIds.has(a.targetMessId)),
+        );
+        const nextSim = wasRepairingFront
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null, speechBubble: null }
+          : state.sim;
+        const nextQueue = wasRepairingFront
+          ? preparePathForFrontAction(
+              filteredQueue,
+              nextSim,
+              repairedObjects,
+              state.walls,
+              state.unlockedHouseIds,
+              state.npcs,
+              remainingMesses,
+              state.bills,
+            )
+          : filteredQueue;
         const post = createSocialPost({
           id: nextId('post'),
           authorName: state.sim.name,
@@ -1758,6 +1829,8 @@ export const useGameStore = create<GameStoreState>()(
           funds: state.funds - REPAIR_TECH_COST,
           placedObjects: repairedObjects,
           messes: remainingMesses,
+          sim: nextSim,
+          actionQueue: nextQueue,
           socialFeed: [post, ...state.socialFeed].slice(0, 18),
           pieMenu: null,
           feedbacks: [
@@ -1790,11 +1863,34 @@ export const useGameStore = create<GameStoreState>()(
         const cleanedObjects = state.placedObjects.map((o) =>
           !o.houseId ? { ...o, cleanliness: 100 } : o,
         );
+        const wasCleaningFront =
+          state.actionQueue[0]?.kind === 'clean_object' ||
+          state.actionQueue[0]?.kind === 'clean_mess';
+        const filteredQueue = state.actionQueue.filter(
+          (a) => a.kind !== 'clean_object' && a.kind !== 'clean_mess',
+        );
+        const nextSim = wasCleaningFront
+          ? { ...state.sim, pose: 'idle' as const, activeObjectId: null, activeProp: null }
+          : state.sim;
+        const nextQueue = wasCleaningFront
+          ? preparePathForFrontAction(
+              filteredQueue,
+              nextSim,
+              cleanedObjects,
+              state.walls,
+              state.unlockedHouseIds,
+              state.npcs,
+              [],
+              state.bills,
+            )
+          : filteredQueue;
 
         set({
           funds: state.funds - MAID_SERVICE_COST,
           placedObjects: cleanedObjects,
           messes: [],
+          sim: nextSim,
+          actionQueue: nextQueue,
           pieMenu: null,
           feedbacks: [
             ...state.feedbacks.slice(-3),
@@ -3500,10 +3596,20 @@ export const useGameStore = create<GameStoreState>()(
                   );
                 }
 
-                // Zoomers Delivery completion toast & post
+                // Zoomers Delivery completion toast, home refresh synergy & post
                 if (front.deliveryItemId) {
                   const delItem = DELIVERY_ITEMS.find((d) => d.id === front.deliveryItemId);
                   if (delItem) {
+                    if (delItem.id === 'zoomers_tidy') {
+                      nextPlacedObjects = nextPlacedObjects.map((o) =>
+                        !o.houseId
+                          ? { ...o, cleanliness: Math.min(100, (o.cleanliness ?? 100) + 35) }
+                          : o,
+                      );
+                      if (nextMesses.length > 0) {
+                        nextMesses = nextMesses.slice(1);
+                      }
+                    }
                     pushFeedback(`Zoomers Delivered: ${delItem.name}!`, 'positive');
                     const post = createSocialPost({
                       id: nextId('post'),
@@ -3678,6 +3784,17 @@ export const useGameStore = create<GameStoreState>()(
                       waterShutoff: false,
                       totalBillsPaid: nextBills.totalBillsPaid + paid,
                     };
+                    if (wasShutoff) {
+                      const billPost = createSocialPost({
+                        id: nextId('post'),
+                        authorName: nextSim.name,
+                        authorColor: nextSim.appearance.topColor,
+                        text: `Paid the §${paid} utility bill at the mailbox — lights and hot water are back on!`,
+                        clock: nextClock,
+                        tag: 'lifestyle',
+                      });
+                      nextSocialFeed = [billPost, ...nextSocialFeed].slice(0, 18);
+                    }
                     pushFeedback(
                       wasShutoff
                         ? `Paid §${paid} — Power & Water Restored!`
@@ -3777,6 +3894,8 @@ export const useGameStore = create<GameStoreState>()(
                   state.walls,
                   nextUnlockedHouseIds,
                   nextNpcs,
+                  nextMesses,
+                  nextBills,
                 );
                 nextQueue = preparedNext;
                 nextSim = {
@@ -4189,10 +4308,15 @@ export const useGameStore = create<GameStoreState>()(
             return n;
           });
 
+          const remainingMesses = state.messes.filter((m) => !occupiedSet.has(`${m.tileX},${m.tileZ}`));
+          const remainingMessIds = new Set(remainingMesses.map((m) => m.id));
           set({
             funds: state.funds - item.price,
             placedObjects: [...state.placedObjects, newObj],
-            messes: state.messes.filter((m) => !occupiedSet.has(`${m.tileX},${m.tileZ}`)),
+            messes: remainingMesses,
+            actionQueue: state.actionQueue.filter(
+              (a) => a.kind !== 'clean_mess' || !a.targetMessId || remainingMessIds.has(a.targetMessId),
+            ),
             npcs: nextNpcs,
             buildSelection: null,
             feedbacks: [
