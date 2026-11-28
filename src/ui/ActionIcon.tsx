@@ -13,6 +13,7 @@ import {
   Heart,
   Home,
   Leaf,
+  Mail,
   MessageCircle,
   Moon,
   Music,
@@ -20,15 +21,18 @@ import {
   PenTool,
   Phone,
   Pizza,
+  ShieldCheck,
   Shirt,
   Smile,
   Sofa,
   Sparkles,
   Sun,
+  Trash2,
   Truck,
   Tv,
   Users,
   Utensils,
+  Wrench,
   Zap,
 } from 'lucide-react';
 
@@ -94,6 +98,14 @@ export function ActionIcon({ name, size = 15 }: { name: string; size?: number })
       return <Heart size={size} />;
     case 'home':
       return <Home size={size} />;
+    case 'wrench':
+      return <Wrench size={size} />;
+    case 'trash':
+      return <Trash2 size={size} />;
+    case 'mail':
+      return <Mail size={size} />;
+    case 'shield':
+      return <ShieldCheck size={size} />;
     case 'footprints':
     default:
       return <Footprints size={size} />;

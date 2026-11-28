@@ -4,6 +4,11 @@ import type { ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { CATALOG_BY_ID } from '../data/catalog';
 import {
+  MAILBOX_STAND_TILE,
+  REPAIR_TECH_COST,
+  UPGRADE_PARTS_PACK_COST,
+} from '../data/householdData';
+import {
   NEIGHBOR_HOUSES,
   WORLD_MAX_X,
   WORLD_MAX_Z,
@@ -13,10 +18,22 @@ import {
   getNeighborHouseContainingTile,
 } from '../data/neighborhood';
 import { LOT_SIZE, STARTER_ROOMS } from '../data/starterLot';
-import { getObjectWorldCenter, isInLotBounds, isInWorldBounds, worldToTile } from '../engine/grid';
+import {
+  getObjectWorldCenter,
+  isInLotBounds,
+  isInWorldBounds,
+  tileToWorld,
+  worldToTile,
+} from '../engine/grid';
+import {
+  getAvailableUpgradesForObject,
+  getMaintenanceSpecForObject,
+  isObjectBlockedByUtility,
+} from '../engine/household';
 import { simRuntime } from '../engine/simRuntime';
 import { useGameStore } from '../store/gameStore';
 import type {
+  HouseholdMess,
   NeighborHouseDef,
   PlacedObject,
   RoomDef,
@@ -620,9 +637,8 @@ function GardenLandscaping() {
         </group>
       ))}
 
-      {/* Charming curbside mailboxes beside each home's walkway */}
+      {/* Neighbor curbside mailboxes (Maya's interactive mailbox is rendered separately) */}
       {[
-        [-0.38, 7.2, '#2f8572'],
         [-15.3, 7.2, '#c66f53'],
         [17.7, 7.2, '#4f7796'],
         [0.65, 12.6, '#4e8c7e'],
@@ -642,6 +658,266 @@ function GardenLandscaping() {
           </mesh>
         </group>
       ))}
+    </group>
+  );
+}
+
+function HomeMailbox({
+  hasBillDue,
+  isOverdue,
+  onSelectMailbox,
+}: {
+  hasBillDue: boolean;
+  isOverdue: boolean;
+  onSelectMailbox: (worldPos: THREE.Vector3) => void;
+}) {
+  const badgeRef = useRef<THREE.Group>(null);
+
+  useFrame(({ clock }) => {
+    if (badgeRef.current && hasBillDue) {
+      const t = clock.getElapsedTime();
+      badgeRef.current.position.y = 1.38 + Math.sin(t * 3.4) * 0.08;
+      badgeRef.current.rotation.y = t * 1.4;
+    }
+  });
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (shouldIgnoreTap()) return;
+    e.stopPropagation();
+    onSelectMailbox(new THREE.Vector3(-0.38, 1.15, 7.2));
+  };
+
+  return (
+    <group position={[-0.38, 0, 7.2]} onClick={handleClick}>
+      <mesh position={[0, 0.45, 0]} castShadow>
+        <boxGeometry args={[0.09, 0.9, 0.09]} />
+        <meshStandardMaterial color="#8c6343" roughness={0.78} />
+      </mesh>
+      <mesh position={[0, 0.94, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
+        <cylinderGeometry args={[0.12, 0.12, 0.38, 12]} />
+        <meshStandardMaterial color="#2f8572" roughness={0.38} metalness={0.25} />
+      </mesh>
+      {/* Red mail flag flips upright when a bill is waiting */}
+      <group position={[0.125, 0.94, 0.04]} rotation={[hasBillDue ? 0 : Math.PI * 0.48, 0, 0]}>
+        <mesh position={[0, 0.07, 0]}>
+          <boxGeometry args={[0.025, 0.16, 0.05]} />
+          <meshStandardMaterial
+            color={isOverdue ? '#ff3b30' : '#e05c4a'}
+            emissive={hasBillDue ? '#e05c4a' : '#000000'}
+            emissiveIntensity={hasBillDue ? 0.6 : 0}
+            roughness={0.4}
+          />
+        </mesh>
+      </group>
+      {/* Floating glowing mail envelope indicator when a bill is unpaid */}
+      {hasBillDue && (
+        <group ref={badgeRef} position={[0, 1.38, 0]}>
+          <mesh castShadow>
+            <boxGeometry args={[0.3, 0.2, 0.05]} />
+            <meshStandardMaterial
+              color={isOverdue ? '#ff5f56' : '#fff8e7'}
+              emissive={isOverdue ? '#ff3b30' : '#f3b644'}
+              emissiveIntensity={0.65}
+              roughness={0.35}
+            />
+          </mesh>
+        </group>
+      )}
+    </group>
+  );
+}
+
+function ObjectStatusEffects({
+  isDirty,
+  isBroken,
+  breakEffect,
+  hasUpgrades,
+}: {
+  isDirty: boolean;
+  isBroken: boolean;
+  breakEffect: 'sparks' | 'leak' | null;
+  hasUpgrades: boolean;
+}) {
+  const dirtyRef = useRef<THREE.Group>(null);
+  const brokenRef = useRef<THREE.Group>(null);
+  const upgradeRef = useRef<THREE.Mesh>(null);
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime();
+    if (dirtyRef.current && isDirty) {
+      dirtyRef.current.children.forEach((child, i) => {
+        const phase = (t * 0.65 + i * 0.33) % 1;
+        child.position.y = 0.65 + phase * 0.72;
+        child.position.x = Math.sin(t * 2 + i * 2.1) * 0.18;
+        const s = 0.55 + Math.sin(phase * Math.PI) * 0.55;
+        child.scale.setScalar(s);
+      });
+    }
+    if (brokenRef.current && isBroken) {
+      if (breakEffect === 'leak') {
+        brokenRef.current.children.forEach((child, i) => {
+          const phase = (t * 1.9 + i * 0.33) % 1;
+          child.position.y = 0.85 - phase * 0.72 + Math.sin(phase * Math.PI) * 0.18;
+          child.position.z = 0.15 + phase * 0.42;
+          child.position.x = (i - 1) * 0.12;
+        });
+      } else {
+        brokenRef.current.children.forEach((child, i) => {
+          const pulse = Math.sin(t * 18 + i * 2.7);
+          child.visible = pulse > 0.1;
+          child.position.y = 0.75 + Math.sin(t * 11 + i) * 0.18;
+          child.position.x = Math.cos(t * 9 + i * 2) * 0.24;
+          child.rotation.z = t * 6;
+        });
+      }
+    }
+    if (upgradeRef.current && hasUpgrades && !isBroken) {
+      upgradeRef.current.rotation.y = t * 1.6;
+      upgradeRef.current.position.y = 1.38 + Math.sin(t * 2.4) * 0.04;
+    }
+  });
+
+  if (!isDirty && !isBroken && !hasUpgrades) return null;
+
+  return (
+    <group>
+      {isDirty && (
+        <group ref={dirtyRef}>
+          {[0, 1, 2].map((i) => (
+            <mesh key={i} position={[0, 0.8, 0]}>
+              <sphereGeometry args={[0.11, 8, 8]} />
+              <meshStandardMaterial
+                color="#7c9c44"
+                emissive="#5c7a2c"
+                emissiveIntensity={0.35}
+                transparent
+                opacity={0.55}
+                depthWrite={false}
+              />
+            </mesh>
+          ))}
+        </group>
+      )}
+
+      {isBroken && (
+        <group ref={brokenRef}>
+          {breakEffect === 'leak'
+            ? [0, 1, 2].map((i) => (
+                <mesh key={i} position={[0, 0.7, 0.2]}>
+                  <sphereGeometry args={[0.055, 8, 8]} />
+                  <meshStandardMaterial
+                    color="#4cc9e0"
+                    emissive="#2aa4c4"
+                    emissiveIntensity={0.5}
+                    roughness={0.15}
+                  />
+                </mesh>
+              ))
+            : [0, 1, 2].map((i) => (
+                <mesh key={i} position={[0, 0.8, 0.15]}>
+                  <octahedronGeometry args={[0.075, 0]} />
+                  <meshBasicMaterial color={i % 2 === 0 ? '#ffe066' : '#56d8ff'} />
+                </mesh>
+              ))}
+        </group>
+      )}
+
+      {hasUpgrades && !isBroken && (
+        <mesh ref={upgradeRef} position={[0.28, 1.38, 0.18]}>
+          <octahedronGeometry args={[0.055, 0]} />
+          <meshStandardMaterial
+            color="#f5cf6e"
+            emissive="#f5b83b"
+            emissiveIntensity={0.75}
+            metalness={0.5}
+            roughness={0.2}
+          />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+function HouseholdMessMesh({
+  mess,
+  onSelectMess,
+}: {
+  mess: HouseholdMess;
+  onSelectMess: (mess: HouseholdMess, worldPos: THREE.Vector3) => void;
+}) {
+  const pos = useMemo(() => tileToWorld(mess.tileX, mess.tileZ), [mess.tileX, mess.tileZ]);
+
+  const handleClick = (e: ThreeEvent<MouseEvent>) => {
+    if (shouldIgnoreTap()) return;
+    e.stopPropagation();
+    onSelectMess(mess, new THREE.Vector3(pos.x, 0.35, pos.z));
+  };
+
+  return (
+    <group position={[pos.x, 0.048, pos.z]} onClick={handleClick}>
+      {mess.kind === 'puddle' && (
+        <group>
+          <mesh rotation={[-Math.PI / 2, 0, 0]}>
+            <circleGeometry args={[0.38, 18]} />
+            <meshPhysicalMaterial
+              color="#4cc9e0"
+              roughness={0.08}
+              metalness={0.05}
+              transparent
+              opacity={0.76}
+              clearcoat={1}
+            />
+          </mesh>
+          <mesh position={[0.16, 0.002, 0.14]} rotation={[-Math.PI / 2, 0, 0]}>
+            <circleGeometry args={[0.17, 12]} />
+            <meshPhysicalMaterial
+              color="#6cd7eb"
+              roughness={0.08}
+              transparent
+              opacity={0.72}
+              clearcoat={1}
+            />
+          </mesh>
+        </group>
+      )}
+
+      {mess.kind === 'dirty_dish' && (
+        <group>
+          <mesh position={[0, 0.02, 0]} castShadow>
+            <cylinderGeometry args={[0.19, 0.14, 0.035, 16]} />
+            <meshStandardMaterial color="#e8e2d5" roughness={0.5} />
+          </mesh>
+          <mesh position={[0.02, 0.04, 0.01]}>
+            <cylinderGeometry args={[0.12, 0.1, 0.015, 12]} />
+            <meshStandardMaterial color="#879e4a" roughness={0.85} />
+          </mesh>
+          <mesh position={[-0.08, 0.24, 0]}>
+            <sphereGeometry args={[0.06, 8, 8]} />
+            <meshStandardMaterial color="#83a649" transparent opacity={0.5} depthWrite={false} />
+          </mesh>
+        </group>
+      )}
+
+      {mess.kind === 'trash_pile' && (
+        <group>
+          <mesh position={[0, 0.07, 0]} castShadow>
+            <dodecahedronGeometry args={[0.15, 0]} />
+            <meshStandardMaterial color="#d4c7b0" roughness={0.92} />
+          </mesh>
+          <mesh position={[0.13, 0.05, 0.08]} castShadow>
+            <dodecahedronGeometry args={[0.09, 0]} />
+            <meshStandardMaterial color="#b59f7e" roughness={0.92} />
+          </mesh>
+          <mesh position={[-0.1, 0.05, -0.06]} castShadow>
+            <dodecahedronGeometry args={[0.085, 0]} />
+            <meshStandardMaterial color="#e3dccb" roughness={0.9} />
+          </mesh>
+          <mesh position={[0, 0.28, 0]}>
+            <sphereGeometry args={[0.065, 8, 8]} />
+            <meshStandardMaterial color="#83a649" transparent opacity={0.48} depthWrite={false} />
+          </mesh>
+        </group>
+      )}
     </group>
   );
 }
@@ -679,6 +955,7 @@ function RoomFloorSlab({
 function PlacedFurnitureItem({
   obj,
   isNight,
+  powerOff = false,
   isSelected,
   isActive,
   isHiddenForMove,
@@ -686,6 +963,7 @@ function PlacedFurnitureItem({
 }: {
   obj: PlacedObject;
   isNight: boolean;
+  powerOff?: boolean;
   isSelected: boolean;
   isActive: boolean;
   isHiddenForMove: boolean;
@@ -696,6 +974,10 @@ function PlacedFurnitureItem({
 
   const center = getObjectWorldCenter(obj.tileX, obj.tileZ, item.footprint, obj.rotation);
   const rotY = (obj.rotation * Math.PI) / 180;
+  const spec = !obj.houseId ? getMaintenanceSpecForObject(obj) : null;
+  const isDirty = !obj.houseId && (obj.cleanliness ?? 100) < 40;
+  const isBroken = Boolean(!obj.houseId && obj.isBroken);
+  const hasUpgrades = Boolean(!obj.houseId && obj.upgrades && obj.upgrades.length > 0);
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
     if (shouldIgnoreTap()) return;
@@ -710,7 +992,18 @@ function PlacedFurnitureItem({
       rotation={[0, rotY, 0]}
       onClick={handleClick}
     >
-      <AssetRenderer item={item} isActive={isActive} isNight={isNight} />
+      <AssetRenderer
+        item={item}
+        isActive={isActive && !isBroken && !powerOff}
+        isNight={isNight}
+        powerOff={powerOff}
+      />
+      <ObjectStatusEffects
+        isDirty={isDirty}
+        isBroken={isBroken}
+        breakEffect={spec?.breakEffect ?? null}
+        hasUpgrades={hasUpgrades}
+      />
       {isSelected && (
         <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.56, 0.68, 28]} />
@@ -729,6 +1022,9 @@ export function LotRenderer() {
   const walls = useGameStore((s) => s.walls);
   const placedObjects = useGameStore((s) => s.placedObjects);
   const unlockedHouseIds = useGameStore((s) => s.unlockedHouseIds);
+  const bills = useGameStore((s) => s.bills);
+  const handiness = useGameStore((s) => s.handiness);
+  const messes = useGameStore((s) => s.messes);
   const activeObjectId = useGameStore((s) => s.sim.activeObjectId);
   const pieMenuObjectId = useGameStore((s) => s.pieMenu?.objectId);
   const buildSelection = useGameStore((s) => s.buildSelection);
@@ -750,6 +1046,99 @@ export function LotRenderer() {
   const worldDepth = WORLD_MAX_Z - WORLD_MIN_Z + 1;
   const worldCenterX = (WORLD_MIN_X + WORLD_MAX_X + 1) / 2 - LOT_SIZE / 2;
   const worldCenterZ = (WORLD_MIN_Z + WORLD_MAX_Z + 1) / 2 - LOT_SIZE / 2;
+
+  const handleMailboxSelect = (worldPos: THREE.Vector3) => {
+    if (wardrobeOpen || mode !== 'live') return;
+    const screen = projectToScreen(worldPos, camera, size);
+    const options: Array<{
+      id: string;
+      label: string;
+      icon: string;
+      cost?: number;
+      disabled?: boolean;
+      reason?: string;
+    }> = [];
+
+    if (bills.amountDue > 0) {
+      options.push({
+        id: 'mailbox:pay_bills',
+        label: 'Pay Bills',
+        icon: 'mail',
+        cost: bills.amountDue,
+        disabled: funds < bills.amountDue,
+        reason: funds < bills.amountDue ? `Needs §${bills.amountDue}` : undefined,
+      });
+    }
+    options.push({
+      id: 'mailbox:open_home',
+      label: 'Bill & Home Info',
+      icon: 'home',
+    });
+    options.push({
+      id: 'mailbox:buy_parts',
+      label: 'Order 2 Parts',
+      icon: 'wrench',
+      cost: UPGRADE_PARTS_PACK_COST,
+      disabled: funds < UPGRADE_PARTS_PACK_COST,
+      reason: funds < UPGRADE_PARTS_PACK_COST ? `Needs §${UPGRADE_PARTS_PACK_COST}` : undefined,
+    });
+
+    openPieMenu({
+      kind: 'mailbox',
+      title: 'Home Mailbox',
+      subtitle:
+        bills.amountDue > 0
+          ? bills.powerShutoff || bills.waterShutoff
+            ? `Utilities Shut Off • §${bills.amountDue} Due`
+            : `Weekly Bill Due: §${bills.amountDue}`
+          : 'All Bills Paid',
+      screenX: screen.x,
+      screenY: screen.y,
+      worldPos: [worldPos.x, worldPos.y, worldPos.z],
+      tile: MAILBOX_STAND_TILE,
+      options,
+    });
+  };
+
+  const handleMessSelect = (mess: HouseholdMess, worldPos: THREE.Vector3) => {
+    if (wardrobeOpen || mode !== 'live') return;
+    if (useGameStore.getState().sim.awayAtWork) {
+      closePieMenu();
+      useGameStore.getState().addFeedback('Maya is at work right now!', 'info');
+      return;
+    }
+    const screen = projectToScreen(worldPos, camera, size);
+    const title =
+      mess.kind === 'puddle'
+        ? 'Water Puddle'
+        : mess.kind === 'dirty_dish'
+          ? 'Dirty Dish'
+          : 'Trash Pile';
+    const label =
+      mess.kind === 'puddle'
+        ? 'Mop Up Puddle'
+        : mess.kind === 'dirty_dish'
+          ? 'Wash Dirty Dish'
+          : 'Throw Away Trash';
+
+    openPieMenu({
+      kind: 'mess',
+      title,
+      subtitle: 'Home Care • Clean Up',
+      screenX: screen.x,
+      screenY: screen.y,
+      worldPos: [worldPos.x, worldPos.y, worldPos.z],
+      messId: mess.id,
+      tile: { x: mess.tileX, z: mess.tileZ },
+      options: [
+        {
+          id: `clean_mess:${mess.id}`,
+          label,
+          icon: mess.kind === 'puddle' ? 'droplet' : mess.kind === 'trash_pile' ? 'trash' : 'sparkles',
+        },
+      ],
+    });
+  };
 
   const handleNeighborHouseSelect = (house: NeighborHouseDef, worldPos: THREE.Vector3) => {
     if (wardrobeOpen || mode !== 'live') return;
@@ -809,24 +1198,101 @@ export function LotRenderer() {
     if (!item) return;
 
     const screen = projectToScreen(worldPos, camera, size);
-    const options = item.interactions.map((inter) => ({
-      id: inter.id,
-      label: inter.label,
-      icon: inter.icon,
-      cost: inter.cost,
-      disabled: (inter.cost ?? 0) > funds,
-      reason: (inter.cost ?? 0) > funds ? `Needs §${inter.cost}` : undefined,
-    }));
+    const isHomeObj = !obj.houseId;
+    const isBroken = Boolean(isHomeObj && obj.isBroken);
+    const cleanliness = obj.cleanliness ?? 100;
+    const utilCheck = isHomeObj ? isObjectBlockedByUtility(obj, bills) : { blocked: false };
+
+    const options: Array<{
+      id: string;
+      label: string;
+      icon: string;
+      cost?: number;
+      disabled?: boolean;
+      reason?: string;
+    }> = [];
+
+    if (isBroken) {
+      options.push({
+        id: `repair_obj:${obj.instanceId}`,
+        label: 'Repair',
+        icon: 'wrench',
+      });
+      options.push({
+        id: 'service:repair_tech',
+        label: 'Call Repair Tech',
+        icon: 'phone',
+        cost: REPAIR_TECH_COST,
+        disabled: funds < REPAIR_TECH_COST,
+        reason: funds < REPAIR_TECH_COST ? `Needs §${REPAIR_TECH_COST}` : undefined,
+      });
+    } else {
+      for (const inter of item.interactions) {
+        const cantAfford = (inter.cost ?? 0) > funds;
+        options.push({
+          id: inter.id,
+          label: inter.label,
+          icon: inter.icon,
+          cost: inter.cost,
+          disabled: utilCheck.blocked || cantAfford,
+          reason: utilCheck.blocked
+            ? utilCheck.reason
+            : cantAfford
+              ? `Needs §${inter.cost}`
+              : undefined,
+        });
+      }
+
+      if (isHomeObj && cleanliness < 65) {
+        options.push({
+          id: `clean_obj:${obj.instanceId}`,
+          label: 'Scrub Clean',
+          icon: 'sparkles',
+        });
+      }
+
+      if (isHomeObj) {
+        const availUpgrades = getAvailableUpgradesForObject(obj, handiness, funds);
+        // Surface up to 2 next upgrades so the radial pie stays sleek & readable
+        const slotsLeft = Math.max(0, 6 - options.length);
+        for (const u of availUpgrades.slice(0, Math.min(2, slotsLeft))) {
+          const disabled = u.lockedBySkill || (!u.canAffordWithParts && !u.canAffordWithFunds);
+          options.push({
+            id: `upgrade_obj:${obj.instanceId}:${u.upgrade.id}`,
+            label: u.canAffordWithParts
+              ? `Upgrade: ${u.upgrade.shortLabel} (${u.upgrade.partsCost}p)`
+              : `Upgrade: ${u.upgrade.shortLabel}`,
+            icon: u.upgrade.icon,
+            cost: u.canAffordWithParts ? undefined : u.upgrade.simoleonCost,
+            disabled,
+            reason: u.reason,
+          });
+        }
+      }
+    }
 
     if (options.length === 0) {
       closePieMenu();
       return;
     }
 
+    const upgradeCount = obj.upgrades?.length ?? 0;
+    const statusSubtitle = obj.houseId
+      ? `Guest Use • ${item.description}`
+      : isBroken
+        ? 'Broken • Repair or call Repair Tech'
+        : utilCheck.blocked
+          ? utilCheck.reason
+          : cleanliness < 40
+            ? 'Grimy • Needs Scrubbing'
+            : upgradeCount > 0
+              ? `Upgraded (${upgradeCount}) • ${cleanliness}% Clean`
+              : item.description;
+
     openPieMenu({
       kind: 'object',
       title: item.name,
-      subtitle: obj.houseId ? `Guest Use • ${item.description}` : item.description,
+      subtitle: statusSubtitle,
       screenX: screen.x,
       screenY: screen.y,
       worldPos: [worldPos.x, worldPos.y, worldPos.z],
@@ -938,8 +1404,15 @@ export function LotRenderer() {
       {/* Sunnyside Lane road, crosswalk, sidewalks, lamps & Coastal Pocket Park */}
       <NeighborhoodStreetAndPark isNight={isNight} onGroundClick={handleGroundClick} />
 
-      {/* Trees, flowerbeds, picket fence & mailboxes */}
+      {/* Trees, flowerbeds, picket fence & neighbor mailboxes */}
       <GardenLandscaping />
+
+      {/* Interactive Home Mailbox (flag pops up when weekly bills arrive) */}
+      <HomeMailbox
+        hasBillDue={bills.amountDue > 0}
+        isOverdue={bills.powerShutoff || bills.waterShutoff}
+        onSelectMailbox={handleMailboxSelect}
+      />
 
       {/* Maya's PBR-textured room floor slabs */}
       {STARTER_ROOMS.map((room) => (
@@ -957,6 +1430,7 @@ export function LotRenderer() {
           key={obj.instanceId}
           obj={obj}
           isNight={isNight}
+          powerOff={bills.powerShutoff}
           isSelected={pieMenuObjectId === obj.instanceId}
           isActive={activeObjectId === obj.instanceId}
           isHiddenForMove={
@@ -964,6 +1438,11 @@ export function LotRenderer() {
           }
           onSelectObject={handleObjectSelect}
         />
+      ))}
+
+      {/* Interactive 3D Floor Messes (puddles, dirty dishes, trash piles) */}
+      {messes.map((mess) => (
+        <HouseholdMessMesh key={mess.id} mess={mess} onSelectMess={handleMessSelect} />
       ))}
 
       {/* 3 Enterable Neighbor Houses: Pitched Roof while locked, Cutaway Interior once invited in */}

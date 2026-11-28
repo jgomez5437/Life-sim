@@ -22,6 +22,7 @@ export function SimControlCluster() {
   const phoneCaseId = useGameStore((s) => s.phoneCaseId);
   const phoneHasBadge = useGameStore((s) => s.phoneHasBadge);
   const shiftPrompt = useGameStore((s) => s.shiftPrompt);
+  const billsDue = useGameStore((s) => s.bills.amountDue);
 
   const setSpeed = useGameStore((s) => s.setSpeed);
   const focusCameraOnSim = useGameStore((s) => s.focusCameraOnSim);
@@ -31,7 +32,7 @@ export function SimControlCluster() {
 
   const emotion = EMOTION_META[sim.emotion];
   const phoneCase = PHONE_CASES_BY_ID[phoneCaseId] ?? PHONE_CASES_BY_ID.coastal_mint;
-  const showBadge = !phoneOpen && (phoneHasBadge || Boolean(shiftPrompt));
+  const showBadge = !phoneOpen && (phoneHasBadge || Boolean(shiftPrompt) || billsDue > 0);
 
   return (
     <section className="sim-cluster hud-interactive" aria-label="Sim portrait, phone, and time controls">

@@ -7,6 +7,7 @@ interface AssetRendererProps {
   item: CatalogItem;
   isActive?: boolean;
   isNight?: boolean;
+  powerOff?: boolean;
   ghostState?: 'valid' | 'invalid';
 }
 
@@ -34,11 +35,12 @@ export function AssetRenderer({
   item,
   isActive = false,
   isNight = false,
+  powerOff = false,
   ghostState,
 }: AssetRendererProps) {
   if (item.modelUrl && !ghostState) {
     return (
-      <Suspense fallback={<ProceduralFurniture item={item} isActive={isActive} isNight={isNight} />}>
+      <Suspense fallback={<ProceduralFurniture item={item} isActive={isActive} isNight={isNight} powerOff={powerOff} />}>
         <GlbModelMesh url={item.modelUrl} />
       </Suspense>
     );
@@ -49,6 +51,7 @@ export function AssetRenderer({
       item={item}
       isActive={isActive}
       isNight={isNight}
+      powerOff={powerOff}
       ghostState={ghostState}
     />
   );

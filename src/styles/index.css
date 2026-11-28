@@ -2877,10 +2877,153 @@ button:disabled {
   color: var(--ink-secondary);
 }
 
+/* ======================== HOUSEHOLD BILLS, HANDINESS & ALERTS ======================== */
+.household-alert-pill {
+  position: absolute;
+  top: calc(var(--safe-top) + 60px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 13px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-glass-strong);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1.5px solid hsla(35, 90%, 48%, 0.45);
+  color: hsl(28, 78%, 34%);
+  font-size: 11.5px;
+  font-weight: 800;
+  box-shadow: var(--shadow-soft);
+  z-index: 34;
+  white-space: nowrap;
+}
+
+.household-alert-pill.urgent {
+  background: hsla(7, 82%, 96%, 0.96);
+  border-color: hsla(7, 78%, 52%, 0.55);
+  color: hsl(7, 74%, 40%);
+}
+
+.phone-career-widget.household-widget.alert {
+  border-color: hsla(35, 88%, 50%, 0.45);
+  background: hsla(40, 85%, 96%, 0.94);
+}
+
+.phone-widget-pill.warn {
+  background: hsla(35, 90%, 50%, 0.18);
+  color: hsl(28, 82%, 34%);
+}
+
+.phone-widget-pill.danger {
+  background: hsla(7, 74%, 56%, 0.18);
+  color: hsl(7, 72%, 42%);
+}
+
+.household-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.household-bill-amount {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink-primary);
+}
+
+.utility-status-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.utility-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 10px;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.utility-chip.on {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.utility-chip.off {
+  background: hsla(7, 74%, 56%, 0.16);
+  color: hsl(7, 72%, 42%);
+}
+
+.bill-breakdown-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border-radius: 11px;
+  background: hsla(212, 20%, 20%, 0.045);
+  font-size: 10.5px;
+  color: var(--ink-secondary);
+}
+
+.bill-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bill-row.eco {
+  color: var(--emerald);
+  font-weight: 700;
+}
+
+.bill-row.total {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-hairline);
+  color: var(--ink-primary);
+  font-weight: 800;
+}
+
+.home-care-stats {
+  display: flex;
+  gap: 5px;
+  margin-top: 4px;
+}
+
+.care-pill {
+  flex: 1 1 0;
+  text-align: center;
+  padding: 4px 5px;
+  border-radius: 8px;
+  background: hsla(212, 18%, 22%, 0.06);
+  color: var(--ink-secondary);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.care-pill.warn {
+  background: hsla(35, 90%, 50%, 0.16);
+  color: hsl(28, 78%, 34%);
+}
+
 /* Compact mobile landscape tuning (e.g. iPhone/Android 390px height) */
 @media (max-height: 450px) {
   .brand-sub {
     display: none;
+  }
+
+  .household-alert-pill {
+    top: calc(var(--safe-top) + 44px);
+    padding: 4px 10px;
+    font-size: 10.5px;
   }
 
   .doorbell-banner {
