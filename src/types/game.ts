@@ -97,6 +97,14 @@ export interface PlacedObject {
   rotation: RotationDeg;
   /** Present on static neighbor-house furniture (non-editable in Build & Buy). */
   houseId?: NeighborHouseId;
+  /** 0-100 cleanliness level on Maya's home lot (defaults to 100). */
+  cleanliness?: number;
+  /** 0-100 durability level on Maya's home lot (defaults to 100). */
+  durability?: number;
+  /** True when the home appliance/plumbing has broken and needs repair. */
+  isBroken?: boolean;
+  /** Permanent upgrades installed by Maya. */
+  upgrades?: UpgradeId[];
 }
 
 export interface TileCoord {
@@ -126,7 +134,15 @@ export interface RoomDef {
   floorType: 'wood_warm' | 'wood_light' | 'tile_kitchen' | 'tile_bath' | 'stone_patio';
 }
 
-export type SpeechBubbleIcon = 'chat' | 'laugh' | 'heart' | 'sparkle' | 'wave' | 'knock' | 'coffee';
+export type SpeechBubbleIcon =
+  | 'chat'
+  | 'laugh'
+  | 'heart'
+  | 'sparkle'
+  | 'wave'
+  | 'knock'
+  | 'coffee'
+  | 'wrench';
 
 export interface ActiveSpeechBubble {
   icon: SpeechBubbleIcon;
@@ -135,13 +151,27 @@ export interface ActiveSpeechBubble {
 
 export interface ActionQueueItem {
   id: string;
-  kind: 'walk' | 'object' | 'self' | 'commute' | 'knock' | 'social_npc';
+  kind:
+    | 'walk'
+    | 'object'
+    | 'self'
+    | 'commute'
+    | 'knock'
+    | 'social_npc'
+    | 'clean_object'
+    | 'repair'
+    | 'upgrade_object'
+    | 'clean_mess'
+    | 'pay_bills';
   label: string;
   icon: string;
   targetObjectId?: string;
   interactionId?: string;
   targetHouseId?: NeighborHouseId;
   targetNpcId?: string;
+  targetMessId?: string;
+  upgradeId?: UpgradeId;
+  partsCost?: number;
   targetTile: TileCoord;
   facingAngle?: number;
   durationSimMinutes: number;
@@ -209,7 +239,7 @@ export interface GameClock {
 }
 
 export interface PieMenuTarget {
-  kind: 'floor' | 'object' | 'sim' | 'npc' | 'house';
+  kind: 'floor' | 'object' | 'sim' | 'npc' | 'house' | 'mess' | 'mailbox';
   title: string;
   subtitle?: string;
   screenX: number;
@@ -218,6 +248,7 @@ export interface PieMenuTarget {
   objectId?: string;
   npcId?: string;
   houseId?: NeighborHouseId;
+  messId?: string;
   tile: TileCoord;
   options: Array<{
     id: string;
@@ -251,7 +282,7 @@ export interface FloatingFeedback {
 
 /* ======================== SMARTPHONE & SOCIAL TYPES ======================== */
 
-export type PhoneAppId = 'home' | 'social' | 'career' | 'order' | 'entertainment';
+export type PhoneAppId = 'home' | 'social' | 'career' | 'household' | 'order' | 'entertainment';
 
 export type PhoneCaseId =
   | 'coastal_mint'
@@ -523,5 +554,59 @@ export interface DoorbellPromptState {
   contactId: string;
   message: string;
 }
+
+/* ======================== HOUSEHOLD BILLS, MESSES & UPGRADES ======================== */
+
+export type UpgradeId = 'eco_saver' | 'self_cleaning' | 'performance_boost' | 'unbreakable';
+
+export interface UpgradeDef {
+  id: UpgradeId;
+  label: string;
+  shortLabel: string;
+  description: string;
+  icon: string;
+  requiredHandiness: number;
+  partsCost: number;
+  simoleonCost: number;
+  durationSimMinutes: number;
+  applicableTypes: CatalogItem['proceduralType'][];
+}
+
+export type MessKind = 'puddle' | 'dirty_dish' | 'trash_pile';
+
+export interface HouseholdMess {
+  id: string;
+  kind: MessKind;
+  tileX: number;
+  tileZ: number;
+  createdAtSimMinute: number;
+}
+
+export interface HandinessState {
+  level: number;
+  xp: number;
+  upgradeParts: number;
+}
+
+export interface BillBreakdown {
+  lotBase: number;
+  furnishings: number;
+  ecoDiscount: number;
+  ecoUpgradeCount: number;
+  total: number;
+}
+
+export interface HouseholdBillsState {
+  amountDue: number;
+  issuedOnDay: number | null;
+  dueTotalMinutes: number | null;
+  waterShutoffTotalMinutes: number | null;
+  powerShutoff: boolean;
+  waterShutoff: boolean;
+  lastBilledDay: number;
+  lastBillBreakdown: BillBreakdown | null;
+  totalBillsPaid: number;
+}
+
 
 

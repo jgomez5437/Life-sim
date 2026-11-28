@@ -8,6 +8,7 @@ interface ProceduralFurnitureProps {
   item: CatalogItem;
   isActive?: boolean;
   isNight?: boolean;
+  powerOff?: boolean;
   ghostState?: 'valid' | 'invalid';
 }
 
@@ -24,6 +25,7 @@ export function ProceduralFurniture({
   item,
   isActive = false,
   isNight = false,
+  powerOff = false,
   ghostState,
 }: ProceduralFurnitureProps) {
   const screenRef = useRef<THREE.MeshStandardMaterial>(null);
@@ -31,7 +33,7 @@ export function ProceduralFurniture({
 
   useFrame(({ clock }) => {
     const t = clock.getElapsedTime();
-    if (screenRef.current && isActive) {
+    if (screenRef.current && isActive && !powerOff) {
       const hue = (t * 0.08) % 1;
       screenRef.current.emissive.setHSL(0.54 + Math.sin(hue * Math.PI * 2) * 0.08, 0.72, 0.55);
       screenRef.current.emissiveIntensity = 0.85 + Math.sin(t * 4) * 0.15;
@@ -802,14 +804,14 @@ export function ProceduralFurniture({
               <meshStandardMaterial color={ghostColor} transparent opacity={0.58} />
             ) : (
               <meshStandardMaterial
-                color={item.primaryColor}
-                emissive={isNight ? '#ffbe6b' : '#ffe3b3'}
-                emissiveIntensity={isNight ? 1.25 : 0.18}
+                color={powerOff ? '#c7beac' : item.primaryColor}
+                emissive={powerOff ? '#000000' : isNight ? '#ffbe6b' : '#ffe3b3'}
+                emissiveIntensity={powerOff ? 0 : isNight ? 1.25 : 0.18}
                 roughness={0.68}
               />
             )}
           </mesh>
-          {isNight && !ghostState && (
+          {isNight && !powerOff && !ghostState && (
             <pointLight
               position={[0, 1.45, 0]}
               color="#ffd28c"

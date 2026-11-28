@@ -41,6 +41,7 @@ const BUBBLE_GLYPHS: Record<SpeechBubbleIcon, { glyph: string; tint: string }> =
   wave: { glyph: '👋', tint: '#28a377' },
   knock: { glyph: '🚪', tint: '#c66f53' },
   coffee: { glyph: '☕', tint: '#8c6244' },
+  wrench: { glyph: '🔧', tint: '#3b89b8' },
 };
 
 const bubbleTexCache: Partial<Record<SpeechBubbleIcon, THREE.CanvasTexture>> = {};

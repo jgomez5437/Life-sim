@@ -83,6 +83,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             work from home, order Zoomers delivery, or swap phone cases.
           </li>
           <li>
+            <strong>Bills, Messes &amp; Upgrades:</strong> Weekly bills arrive Mondays at 8 AM
+            (pay at your Mailbox or Phone before Power/Water shut off). Scrub grime, mop puddles,
+            repair broken items to level Handiness (Lv 1–5) &amp; install permanent upgrades, or
+            call a Repair Tech / Maid!
+          </li>
+          <li>
             <strong>Build &amp; Buy:</strong> Pick items from the bottom dock or tap existing
             furniture to move, rotate 90°, or sell for 80% Simoleons.
           </li>

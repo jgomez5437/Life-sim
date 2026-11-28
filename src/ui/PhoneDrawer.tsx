@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Droplets,
   Gamepad2,
   Heart,
   Home,
@@ -14,10 +15,19 @@ import {
   Truck,
   UserPlus,
   Users,
+  Wrench,
   X,
+  Zap,
 } from 'lucide-react';
 import { CAREERS, CAREERS_BY_ID } from '../data/careers';
 import { SELF_INTERACTIONS } from '../data/catalog';
+import {
+  MAID_SERVICE_COST,
+  MAX_HANDINESS_LEVEL,
+  REPAIR_TECH_COST,
+  UPGRADE_PARTS_PACK_COST,
+  UPGRADE_PARTS_PACK_QTY,
+} from '../data/householdData';
 import { NEIGHBOR_HOUSES_BY_ID, isTileInRect } from '../data/neighborhood';
 import {
   DELIVERY_ITEMS,
@@ -36,6 +46,11 @@ import {
   getShiftWindowForDay,
   isWorkday,
 } from '../engine/careers';
+import {
+  calculateWeeklyBill,
+  getDaysUntilNextMondayBill,
+  getHandinessXpForNextLevel,
+} from '../engine/household';
 import { NEED_LABELS, formatSimTime } from '../engine/simulation';
 import {
   RELATIONSHIP_TIER_META,
@@ -51,6 +66,7 @@ const APP_TITLES: Record<PhoneAppId, string> = {
   home: 'Sunnyside OS',
   social: 'Social',
   career: 'Career Hub',
+  household: 'Home & Bills',
   order: 'Zoomers Delivery',
   entertainment: 'Entertainment',
 };
@@ -73,6 +89,10 @@ export function PhoneDrawer() {
   const clock = useGameStore((s) => s.clock);
   const funds = useGameStore((s) => s.funds);
   const sim = useGameStore((s) => s.sim);
+  const placedObjects = useGameStore((s) => s.placedObjects);
+  const bills = useGameStore((s) => s.bills);
+  const handiness = useGameStore((s) => s.handiness);
+  const messes = useGameStore((s) => s.messes);
   const contacts = useGameStore((s) => s.contacts);
   const npcs = useGameStore((s) => s.npcs);
   const unlockedHouseIds = useGameStore((s) => s.unlockedHouseIds);
@@ -88,6 +108,10 @@ export function PhoneDrawer() {
   const inviteContactOver = useGameStore((s) => s.inviteContactOver);
   const visitNeighborHouse = useGameStore((s) => s.visitNeighborHouse);
   const orderDelivery = useGameStore((s) => s.orderDelivery);
+  const payHouseholdBills = useGameStore((s) => s.payHouseholdBills);
+  const callRepairTech = useGameStore((s) => s.callRepairTech);
+  const hireCleaningMaid = useGameStore((s) => s.hireCleaningMaid);
+  const buyUpgradeParts = useGameStore((s) => s.buyUpgradeParts);
   const enqueueSelfInteraction = useGameStore((s) => s.enqueueSelfInteraction);
   const joinCareer = useGameStore((s) => s.joinCareer);
   const quitCareer = useGameStore((s) => s.quitCareer);
@@ -153,6 +177,16 @@ export function PhoneDrawer() {
   const entertainmentActions = SELF_INTERACTIONS.filter((inter) =>
     (ENTERTAINMENT_APP_IDS as readonly string[]).includes(inter.id),
   );
+
+  const billForecast = calculateWeeklyBill(placedObjects);
+  const daysToNextBill = getDaysUntilNextMondayBill(clock.day, clock.hour, bills.lastBilledDay);
+  const brokenHomeCount = placedObjects.filter((o) => !o.houseId && o.isBroken).length;
+  const dirtyHomeCount = placedObjects.filter((o) => !o.houseId && (o.cleanliness ?? 100) < 65).length;
+  const handinessNextXp = getHandinessXpForNextLevel(handiness.level);
+  const handinessPct =
+    handiness.level >= MAX_HANDINESS_LEVEL || handinessNextXp <= 0
+      ? 100
+      : Math.min(100, Math.round((handiness.xp / handinessNextXp) * 100));
 
   return (
     <aside
@@ -296,6 +330,47 @@ export function PhoneDrawer() {
                 <span className="phone-app-sub">Apps &amp; Music</span>
               </button>
             </div>
+
+            <button
+              id="btn-app-household"
+              type="button"
+              className={`phone-career-widget household-widget ${
+                bills.amountDue > 0 || brokenHomeCount > 0 ? 'alert' : ''
+              }`}
+              onClick={() => setPhoneApp('household')}
+            >
+              <div className="phone-career-widget-top">
+                <span className="phone-widget-kicker" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <Home size={11} /> Home &amp; Bills
+                </span>
+                <span
+                  className={`phone-widget-pill ${
+                    bills.powerShutoff || bills.waterShutoff
+                      ? 'danger'
+                      : bills.amountDue > 0 || brokenHomeCount > 0
+                        ? 'warn'
+                        : ''
+                  }`}
+                >
+                  {bills.waterShutoff
+                    ? 'Water Off!'
+                    : bills.powerShutoff
+                      ? 'Power Off!'
+                      : bills.amountDue > 0
+                        ? `§${bills.amountDue} Due`
+                        : brokenHomeCount > 0
+                          ? `${brokenHomeCount} Broken`
+                          : 'All Clear'}
+                </span>
+              </div>
+              <div className="phone-widget-main">
+                <strong>Handiness Lv {handiness.level}</strong>
+                <span>
+                  {' '}
+                  · {handiness.upgradeParts} Parts · Est. §{billForecast.total}/wk
+                </span>
+              </div>
+            </button>
 
             <button
               type="button"
@@ -815,6 +890,170 @@ export function PhoneDrawer() {
           </div>
         )}
 
+        {/* ======================== HOME & BILLS APP ======================== */}
+        {phoneApp === 'household' && (
+          <div className="phone-app-view">
+            {/* Weekly Bills & Utilities Card */}
+            <div className="career-hero-card">
+              <div className="household-card-head">
+                <div>
+                  <div className="career-task-kicker">Weekly Utility Bill</div>
+                  <strong className="household-bill-amount">
+                    {bills.amountDue > 0 ? `§${bills.amountDue} Due` : 'Paid in Full'}
+                  </strong>
+                </div>
+                <span
+                  className={`phone-widget-pill ${
+                    bills.powerShutoff || bills.waterShutoff
+                      ? 'danger'
+                      : bills.amountDue > 0
+                        ? 'warn'
+                        : ''
+                  }`}
+                >
+                  {bills.amountDue > 0
+                    ? bills.waterShutoff
+                      ? 'Utilities Off'
+                      : bills.powerShutoff
+                        ? 'Power Off'
+                        : 'Due Now'
+                    : daysToNextBill === 0
+                      ? 'Mon 8 AM'
+                      : `In ${daysToNextBill}d (Mon)`}
+                </span>
+              </div>
+
+              <div className="utility-status-row">
+                <span className={`utility-chip ${bills.powerShutoff ? 'off' : 'on'}`}>
+                  <Zap size={11} /> Power: {bills.powerShutoff ? 'OFF' : 'On'}
+                </span>
+                <span className={`utility-chip ${bills.waterShutoff ? 'off' : 'on'}`}>
+                  <Droplets size={11} /> Water: {bills.waterShutoff ? 'OFF' : 'On'}
+                </span>
+              </div>
+
+              <div className="bill-breakdown-box">
+                <div className="bill-row">
+                  <span>Lot Property Tax</span>
+                  <span>§{billForecast.lotBase}</span>
+                </div>
+                <div className="bill-row">
+                  <span>Home Furnishings</span>
+                  <span>§{billForecast.furnishings}</span>
+                </div>
+                {billForecast.ecoDiscount > 0 && (
+                  <div className="bill-row eco">
+                    <span>Eco Upgrades ({billForecast.ecoUpgradeCount})</span>
+                    <span>-§{billForecast.ecoDiscount}</span>
+                  </div>
+                )}
+                <div className="bill-row total">
+                  <span>{bills.amountDue > 0 ? 'Amount Due' : 'Est. Next Monday'}</span>
+                  <strong>§{bills.amountDue > 0 ? bills.amountDue : billForecast.total}</strong>
+                </div>
+              </div>
+
+              {bills.amountDue > 0 && (
+                <button
+                  id="btn-pay-bills-phone"
+                  type="button"
+                  className="phone-primary-btn"
+                  disabled={funds < bills.amountDue}
+                  onClick={payHouseholdBills}
+                >
+                  Pay Household Bills (§{bills.amountDue})
+                </button>
+              )}
+            </div>
+
+            {/* Handiness & Upgrade Parts Card */}
+            <div className="career-task-card">
+              <div className="career-task-head">
+                <span className="career-task-kicker">
+                  <Wrench size={10} style={{ display: 'inline', verticalAlign: '-1px' }} /> Handiness
+                  Skill
+                </span>
+                <span className="career-lv-chip">
+                  {handiness.level >= MAX_HANDINESS_LEVEL
+                    ? `Lv ${handiness.level} · Master`
+                    : `Lv ${handiness.level}/${MAX_HANDINESS_LEVEL}`}
+                </span>
+              </div>
+              <div className="perf-block">
+                <div className="perf-head">
+                  <span>
+                    {handiness.level >= MAX_HANDINESS_LEVEL
+                      ? 'All upgrades unlocked + faster repairs!'
+                      : `${handiness.xp}/${handinessNextXp} XP to Lv ${handiness.level + 1}`}
+                  </span>
+                  <span>{handiness.upgradeParts} Parts</span>
+                </div>
+                <div className="perf-track">
+                  <div
+                    className="perf-fill"
+                    style={{ width: `${handinessPct}%`, background: '#3b89b8' }}
+                  />
+                </div>
+              </div>
+              <button
+                id="btn-buy-upgrade-parts"
+                type="button"
+                className="phone-soft-btn sm"
+                disabled={funds < UPGRADE_PARTS_PACK_COST}
+                onClick={buyUpgradeParts}
+                style={{ marginTop: 4 }}
+              >
+                Buy +{UPGRADE_PARTS_PACK_QTY} Upgrade Parts (§{UPGRADE_PARTS_PACK_COST})
+              </button>
+            </div>
+
+            {/* Home Care Status & Repair / Maid Dispatch */}
+            <div className="career-task-card">
+              <div className="career-task-head">
+                <span className="career-task-kicker">Home Care &amp; Services</span>
+                <span className="career-task-status">
+                  {brokenHomeCount === 0 && dirtyHomeCount === 0 && messes.length === 0
+                    ? 'Spotless'
+                    : 'Needs Care'}
+                </span>
+              </div>
+              <div className="home-care-stats">
+                <span className={`care-pill ${brokenHomeCount > 0 ? 'warn' : ''}`}>
+                  Broken: {brokenHomeCount}
+                </span>
+                <span className={`care-pill ${dirtyHomeCount > 0 ? 'warn' : ''}`}>
+                  Grimy: {dirtyHomeCount}
+                </span>
+                <span className={`care-pill ${messes.length > 0 ? 'warn' : ''}`}>
+                  Messes: {messes.length}
+                </span>
+              </div>
+              <div className="career-actions-grid" style={{ marginTop: 6 }}>
+                <button
+                  id="btn-call-repair-tech"
+                  type="button"
+                  className="phone-primary-btn sm"
+                  disabled={brokenHomeCount === 0 || funds < REPAIR_TECH_COST}
+                  onClick={callRepairTech}
+                >
+                  Repair Tech (§{REPAIR_TECH_COST})
+                </button>
+                <button
+                  id="btn-hire-maid"
+                  type="button"
+                  className="phone-soft-btn sm"
+                  disabled={
+                    (dirtyHomeCount === 0 && messes.length === 0) || funds < MAID_SERVICE_COST
+                  }
+                  onClick={hireCleaningMaid}
+                >
+                  Hire Maid (§{MAID_SERVICE_COST})
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ======================== ZOOMERS ORDER APP ======================== */}
         {phoneApp === 'order' && (
           <div className="phone-app-view">
@@ -823,6 +1062,71 @@ export function PhoneDrawer() {
               <strong>§{funds.toLocaleString()}</strong>
             </div>
             <div className="phone-list">
+              {/* Instant Home Services */}
+              <div className="order-card">
+                <div className="order-card-head">
+                  <span className="order-icon-wrap cat-service">
+                    <Wrench size={14} />
+                  </span>
+                  <div className="order-meta">
+                    <div className="order-name-row">
+                      <strong>Repair Tech Dispatch</strong>
+                      <span className="order-price-pill">§{REPAIR_TECH_COST}</span>
+                    </div>
+                    <p className="order-desc">
+                      Fixes all broken home appliances &amp; mops leaking puddles right away.
+                    </p>
+                  </div>
+                </div>
+                <div className="order-bottom">
+                  <span className="need-chip">
+                    {brokenHomeCount > 0 ? `${brokenHomeCount} broken` : 'None broken'}
+                  </span>
+                  <button
+                    type="button"
+                    className="phone-primary-btn sm"
+                    disabled={brokenHomeCount === 0 || funds < REPAIR_TECH_COST}
+                    onClick={callRepairTech}
+                  >
+                    Dispatch
+                  </button>
+                </div>
+              </div>
+
+              <div className="order-card">
+                <div className="order-card-head">
+                  <span className="order-icon-wrap cat-service">
+                    <Sparkles size={14} />
+                  </span>
+                  <div className="order-meta">
+                    <div className="order-name-row">
+                      <strong>Cleaning Maid Visit</strong>
+                      <span className="order-price-pill">§{MAID_SERVICE_COST}</span>
+                    </div>
+                    <p className="order-desc">
+                      Scrubs all grimy fixtures &amp; clears every puddle, dish, and trash pile.
+                    </p>
+                  </div>
+                </div>
+                <div className="order-bottom">
+                  <span className="need-chip">
+                    {dirtyHomeCount + messes.length > 0
+                      ? `${dirtyHomeCount + messes.length} spots`
+                      : 'Spotless'}
+                  </span>
+                  <button
+                    type="button"
+                    className="phone-primary-btn sm"
+                    disabled={
+                      (dirtyHomeCount === 0 && messes.length === 0) || funds < MAID_SERVICE_COST
+                    }
+                    onClick={hireCleaningMaid}
+                  >
+                    Book
+                  </button>
+                </div>
+              </div>
+
               {DELIVERY_ITEMS.map((item) => {
                 const canAfford = funds >= item.cost && !sim.awayAtWork;
                 const chips = formatNeedChips(item.needDeltas);

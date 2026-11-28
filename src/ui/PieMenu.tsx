@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useGameStore } from '../store/gameStore';
-import type { NeighborHouseId } from '../types/game';
+import type { NeighborHouseId, UpgradeId } from '../types/game';
 import { ActionIcon } from './ActionIcon';
 
 export function PieMenu() {
@@ -12,6 +12,14 @@ export function PieMenu() {
   const enqueueKnockOnHouse = useGameStore((s) => s.enqueueKnockOnHouse);
   const enqueueNpcInteraction = useGameStore((s) => s.enqueueNpcInteraction);
   const sendVisitorHome = useGameStore((s) => s.sendVisitorHome);
+  const enqueueCleanObject = useGameStore((s) => s.enqueueCleanObject);
+  const enqueueRepairObject = useGameStore((s) => s.enqueueRepairObject);
+  const enqueueUpgradeObject = useGameStore((s) => s.enqueueUpgradeObject);
+  const enqueueCleanMess = useGameStore((s) => s.enqueueCleanMess);
+  const enqueuePayBillsAtMailbox = useGameStore((s) => s.enqueuePayBillsAtMailbox);
+  const callRepairTech = useGameStore((s) => s.callRepairTech);
+  const buyUpgradeParts = useGameStore((s) => s.buyUpgradeParts);
+  const openPhone = useGameStore((s) => s.openPhone);
 
   useEffect(() => {
     if (!pieMenu) return;
@@ -34,8 +42,8 @@ export function PieMenu() {
   const clampedY = Math.max(marginY, Math.min(vh - marginY, pieMenu.screenY));
 
   const count = pieMenu.options.length;
-  const radiusX = count <= 2 ? 104 : 114;
-  const radiusY = count <= 2 ? 54 : 66;
+  const radiusX = count <= 2 ? 104 : 118;
+  const radiusY = count <= 2 ? 54 : 72;
 
   const handleOptionClick = (optId: string) => {
     if (optId === 'walk_here') {
@@ -62,6 +70,42 @@ export function PieMenu() {
       const contactId = optId.replace('npc_send_home:', '');
       sendVisitorHome(contactId);
       closePieMenu();
+      return;
+    }
+    if (optId.startsWith('clean_obj:')) {
+      enqueueCleanObject(optId.replace('clean_obj:', ''));
+      return;
+    }
+    if (optId.startsWith('repair_obj:')) {
+      enqueueRepairObject(optId.replace('repair_obj:', ''));
+      return;
+    }
+    if (optId.startsWith('upgrade_obj:')) {
+      const [, objectId, upgradeId] = optId.split(':');
+      if (objectId && upgradeId) {
+        enqueueUpgradeObject(objectId, upgradeId as UpgradeId);
+      }
+      return;
+    }
+    if (optId.startsWith('clean_mess:')) {
+      enqueueCleanMess(optId.replace('clean_mess:', ''));
+      return;
+    }
+    if (optId === 'service:repair_tech') {
+      callRepairTech();
+      return;
+    }
+    if (optId === 'mailbox:pay_bills') {
+      enqueuePayBillsAtMailbox();
+      return;
+    }
+    if (optId === 'mailbox:open_home') {
+      closePieMenu();
+      openPhone('household');
+      return;
+    }
+    if (optId === 'mailbox:buy_parts') {
+      buyUpgradeParts();
       return;
     }
     if (pieMenu.objectId) {

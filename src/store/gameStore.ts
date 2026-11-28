@@ -3,6 +3,19 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 import { CAREERS_BY_ID } from '../data/careers';
 import { CATALOG_BY_ID, SELF_INTERACTIONS } from '../data/catalog';
 import {
+  DISH_SPAWNING_INTERACTION_IDS,
+  MAID_SERVICE_COST,
+  MAILBOX_STAND_TILE,
+  MAX_HANDINESS_LEVEL,
+  MAX_HOUSEHOLD_MESSES,
+  REPAIR_TECH_COST,
+  UPGRADE_BY_ID,
+  UPGRADE_PARTS_PACK_COST,
+  UPGRADE_PARTS_PACK_QTY,
+  createInitialBillsState,
+  createInitialHandiness,
+} from '../data/householdData';
+import {
   ALL_NEIGHBOR_OBJECTS,
   ALL_NEIGHBOR_WALLS,
   MAYA_FRONT_DOOR_OUTSIDE,
@@ -36,6 +49,7 @@ import {
   formatHour12,
   generateWfhTasksForDay,
   getCareerLevel,
+  getDayOfWeek,
   getNextCareerLevel,
   getShiftWindowForDay,
   isWorkday,
@@ -49,6 +63,16 @@ import {
   isPlacementValid,
   tileToWorld,
 } from '../engine/grid';
+import {
+  applyObjectUseWear,
+  applyPerformanceUpgradeBonus,
+  awardHandinessXp,
+  calculateWeeklyBill,
+  findNearbyMessSpawnTile,
+  getEnvironmentMessPenalty,
+  getMaintenanceSpecForObject,
+  isObjectBlockedByUtility,
+} from '../engine/household';
 import {
   createInitialNpcWorldStates,
   getLockedDoorWallIdsForMaya,
@@ -76,6 +100,9 @@ import type {
   GameClock,
   GameMode,
   GraphicsQuality,
+  HandinessState,
+  HouseholdBillsState,
+  HouseholdMess,
   NeedKey,
   NeighborHouseId,
   NpcContact,
@@ -93,6 +120,7 @@ import type {
   SimState,
   SocialPost,
   TileCoord,
+  UpgradeId,
   WallSegment,
   WallViewMode,
   WorkTone,
@@ -146,6 +174,11 @@ export interface GameStoreState {
   activeChanceCard: ActiveChanceCardState | null;
   promotionSummary: PromotionSummary | null;
 
+  // Household Bills, Messes, Handiness & Upgrades state
+  bills: HouseholdBillsState;
+  handiness: HandinessState;
+  messes: HouseholdMess[];
+
   // Mode & HUD actions
   setMode: (mode: GameMode) => void;
   cycleWallMode: () => void;
@@ -166,6 +199,17 @@ export interface GameStoreState {
   setPhoneCase: (caseId: PhoneCaseId) => void;
   enqueueContactInteraction: (contactId: string, socialActionId: string) => boolean;
   orderDelivery: (deliveryItemId: string) => boolean;
+
+  // Household Bills, Maintenance, Upgrades & Service actions
+  payHouseholdBills: () => boolean;
+  enqueuePayBillsAtMailbox: () => boolean;
+  enqueueCleanObject: (objectId: string) => boolean;
+  enqueueRepairObject: (objectId: string) => boolean;
+  enqueueUpgradeObject: (objectId: string, upgradeId: UpgradeId) => boolean;
+  enqueueCleanMess: (messId: string) => boolean;
+  callRepairTech: () => boolean;
+  hireCleaningMaid: () => boolean;
+  buyUpgradeParts: () => boolean;
 
   // Neighborhood & Live NPC actions
   enqueueKnockOnHouse: (houseId: NeighborHouseId) => boolean;
@@ -291,7 +335,13 @@ function preparePathForFrontAction(
     let targetTile = front.targetTile;
     let facingAngle = front.facingAngle;
 
-    if (front.kind === 'object' && front.targetObjectId) {
+    if (
+      (front.kind === 'object' ||
+        front.kind === 'clean_object' ||
+        front.kind === 'repair' ||
+        front.kind === 'upgrade_object') &&
+      front.targetObjectId
+    ) {
       const obj = allObjects.find((o) => o.instanceId === front.targetObjectId);
       const item = obj ? CATALOG_BY_ID[obj.catalogId] : null;
       if (!obj || !item) {
@@ -305,6 +355,9 @@ function preparePathForFrontAction(
       }
       targetTile = slot.tile;
       facingAngle = slot.facingAngle;
+    } else if (front.kind === 'pay_bills') {
+      targetTile = MAILBOX_STAND_TILE;
+      facingAngle = 0;
     } else if (front.kind === 'social_npc' && front.targetNpcId) {
       const npc = npcs.find((n) => n.contactId === front.targetNpcId);
       if (!npc) {
@@ -502,6 +555,11 @@ export const useGameStore = create<GameStoreState>()(
       activeShift: null,
       activeChanceCard: null,
       promotionSummary: null,
+
+      // Household Bills, Messes, Handiness & Upgrades state
+      bills: createInitialBillsState(),
+      handiness: createInitialHandiness(),
+      messes: [],
 
       setMode: (mode) => {
         const state = get();
@@ -1275,6 +1333,508 @@ export const useGameStore = create<GameStoreState>()(
         return true;
       },
 
+      payHouseholdBills: () => {
+        const state = get();
+        if (state.bills.amountDue <= 0) {
+          state.addFeedback('All household bills are already paid!', 'info');
+          return false;
+        }
+        if (state.funds < state.bills.amountDue) {
+          state.addFeedback(`Need §${state.bills.amountDue} to pay bills`, 'negative');
+          return false;
+        }
+        const paid = state.bills.amountDue;
+        const wasShutoff = state.bills.powerShutoff || state.bills.waterShutoff;
+        const nextSocialFeed = wasShutoff
+          ? [
+              createSocialPost({
+                id: nextId('post'),
+                authorName: state.sim.name,
+                authorColor: state.sim.appearance.topColor,
+                text: `Paid the §${paid} utility bill — lights and hot water are officially back on!`,
+                clock: state.clock,
+                tag: 'lifestyle',
+              }),
+              ...state.socialFeed,
+            ].slice(0, 18)
+          : state.socialFeed;
+
+        set({
+          funds: state.funds - paid,
+          bills: {
+            ...state.bills,
+            amountDue: 0,
+            issuedOnDay: null,
+            dueTotalMinutes: null,
+            waterShutoffTotalMinutes: null,
+            powerShutoff: false,
+            waterShutoff: false,
+            totalBillsPaid: state.bills.totalBillsPaid + paid,
+          },
+          socialFeed: nextSocialFeed,
+          pieMenu: null,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: wasShutoff
+                ? `Paid §${paid} — Power & Water Restored!`
+                : `Household Bills Paid (-§${paid})`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      enqueuePayBillsAtMailbox: () => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.bills.amountDue <= 0) {
+          state.addFeedback('No unpaid bills in the mailbox!', 'info');
+          return false;
+        }
+        if (state.funds < state.bills.amountDue) {
+          state.addFeedback(`Need §${state.bills.amountDue} to pay bills`, 'negative');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const path = findPath(startTile, MAILBOX_STAND_TILE, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          return state.payHouseholdBills();
+        }
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'pay_bills',
+          label: `Pay Bills (§${state.bills.amountDue})`,
+          icon: 'mail',
+          targetTile: MAILBOX_STAND_TILE,
+          facingAngle: 0,
+          durationSimMinutes: 6,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: {},
+          animationPose: 'stand_use',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      enqueueCleanObject: (objectId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const obj = state.placedObjects.find((o) => o.instanceId === objectId);
+        if (!obj || obj.houseId) return false;
+        const item = CATALOG_BY_ID[obj.catalogId];
+        if (!item) return false;
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, startTile, lockedDoors);
+        if (!slot) {
+          state.addFeedback(`${item.name} is blocked!`, 'negative');
+          return false;
+        }
+        const path = findPath(startTile, slot.tile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback(`Cannot reach ${item.name}`, 'negative');
+          return false;
+        }
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'clean_object',
+          label: `Scrub ${item.name}`,
+          icon: 'sparkles',
+          targetObjectId: objectId,
+          targetTile: slot.tile,
+          facingAngle: slot.facingAngle,
+          durationSimMinutes: 16,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: { hygiene: -5, fun: -3 },
+          animationPose: 'wash',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      enqueueRepairObject: (objectId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const obj = state.placedObjects.find((o) => o.instanceId === objectId);
+        if (!obj || obj.houseId || !obj.isBroken) return false;
+        const item = CATALOG_BY_ID[obj.catalogId];
+        if (!item) return false;
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, startTile, lockedDoors);
+        if (!slot) {
+          state.addFeedback(`${item.name} is blocked!`, 'negative');
+          return false;
+        }
+        const path = findPath(startTile, slot.tile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback(`Cannot reach ${item.name}`, 'negative');
+          return false;
+        }
+
+        const speedScale = state.handiness.level >= MAX_HANDINESS_LEVEL ? 0.65 : 1 - (state.handiness.level - 1) * 0.08;
+        const duration = Math.max(12, Math.round(28 * speedScale));
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'repair',
+          label: `Repair ${item.name}`,
+          icon: 'wrench',
+          targetObjectId: objectId,
+          targetTile: slot.tile,
+          facingAngle: slot.facingAngle,
+          durationSimMinutes: duration,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: { energy: -6, hygiene: -6 },
+          animationPose: 'stand_use',
+          bubbleIcon: 'wrench',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      enqueueUpgradeObject: (objectId, upgradeId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const obj = state.placedObjects.find((o) => o.instanceId === objectId);
+        if (!obj || obj.houseId) return false;
+        if (obj.isBroken) {
+          state.addFeedback('Repair this item before upgrading it!', 'info');
+          return false;
+        }
+        if (obj.upgrades?.includes(upgradeId)) {
+          state.addFeedback('Upgrade already installed!', 'info');
+          return false;
+        }
+        const item = CATALOG_BY_ID[obj.catalogId];
+        const upgrade = UPGRADE_BY_ID[upgradeId];
+        if (!item || !upgrade || !upgrade.applicableTypes.includes(item.proceduralType)) {
+          return false;
+        }
+
+        if (state.handiness.level < upgrade.requiredHandiness) {
+          state.addFeedback(`Needs Handiness Lv ${upgrade.requiredHandiness}`, 'negative');
+          return false;
+        }
+
+        const useParts = state.handiness.upgradeParts >= upgrade.partsCost;
+        const simCost = useParts ? 0 : upgrade.simoleonCost;
+        if (!useParts && state.funds < simCost) {
+          state.addFeedback(
+            `Needs ${upgrade.partsCost} Parts or §${upgrade.simoleonCost}`,
+            'negative',
+          );
+          return false;
+        }
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const slot = getBestInteractionSlot(obj, item, allObjects, allWalls, startTile, lockedDoors);
+        if (!slot) {
+          state.addFeedback(`${item.name} is blocked!`, 'negative');
+          return false;
+        }
+        const path = findPath(startTile, slot.tile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback(`Cannot reach ${item.name}`, 'negative');
+          return false;
+        }
+
+        const speedScale = state.handiness.level >= MAX_HANDINESS_LEVEL ? 0.65 : 1 - (state.handiness.level - 1) * 0.06;
+        const duration = Math.max(12, Math.round(upgrade.durationSimMinutes * speedScale));
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'upgrade_object',
+          label: `Upgrade: ${upgrade.shortLabel}`,
+          icon: upgrade.icon,
+          targetObjectId: objectId,
+          upgradeId,
+          partsCost: useParts ? upgrade.partsCost : 0,
+          targetTile: slot.tile,
+          facingAngle: slot.facingAngle,
+          durationSimMinutes: duration,
+          elapsedSimMinutes: 0,
+          cost: simCost,
+          costPaid: false,
+          needDeltas: { energy: -5, fun: 6 },
+          animationPose: 'stand_use',
+          emotionBoost: 'inspired',
+          bubbleIcon: 'wrench',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      enqueueCleanMess: (messId) => {
+        const state = get();
+        if (state.sim.awayAtWork) {
+          state.addFeedback('Maya is at work right now!', 'info');
+          return false;
+        }
+        if (state.actionQueue.length >= MAX_QUEUE_LENGTH) {
+          state.addFeedback('Action queue is full', 'info');
+          return false;
+        }
+        const mess = state.messes.find((m) => m.id === messId);
+        if (!mess) return false;
+
+        const startTile =
+          state.actionQueue.length > 0
+            ? state.actionQueue[state.actionQueue.length - 1].targetTile
+            : { x: state.sim.tileX, z: state.sim.tileZ };
+        const allObjects = getAllWorldObjects(state.placedObjects);
+        const allWalls = getAllWorldWalls(state.walls);
+        const lockedDoors = getLockedDoorWallIdsForMaya(state.unlockedHouseIds);
+        const targetTile = { x: mess.tileX, z: mess.tileZ };
+        const path = findPath(startTile, targetTile, allObjects, allWalls, lockedDoors);
+        if (path === null) {
+          state.addFeedback('Cannot reach that mess right now', 'negative');
+          return false;
+        }
+
+        const label =
+          mess.kind === 'puddle'
+            ? 'Mop Up Puddle'
+            : mess.kind === 'dirty_dish'
+              ? 'Wash Dirty Dish'
+              : 'Throw Away Trash';
+
+        const action: ActionQueueItem = {
+          id: nextId('act'),
+          kind: 'clean_mess',
+          label,
+          icon: mess.kind === 'puddle' ? 'droplet' : mess.kind === 'trash_pile' ? 'trash' : 'sparkles',
+          targetMessId: messId,
+          targetTile,
+          durationSimMinutes: 10,
+          elapsedSimMinutes: 0,
+          cost: 0,
+          costPaid: true,
+          needDeltas: { hygiene: -3 },
+          animationPose: 'wash',
+          phase: 'routing',
+          path: state.actionQueue.length === 0 ? path : [],
+          pathIndex: 0,
+        };
+
+        set({
+          actionQueue: [...state.actionQueue, action],
+          pieMenu: null,
+          phoneOpen: false,
+          idleSimMinutes: 0,
+        });
+        return true;
+      },
+
+      callRepairTech: () => {
+        const state = get();
+        const brokenCount = state.placedObjects.filter((o) => !o.houseId && o.isBroken).length;
+        if (brokenCount === 0) {
+          state.addFeedback('All home appliances are working fine!', 'info');
+          return false;
+        }
+        if (state.funds < REPAIR_TECH_COST) {
+          state.addFeedback(`Need §${REPAIR_TECH_COST} for Repair Tech`, 'negative');
+          return false;
+        }
+
+        const repairedObjects = state.placedObjects.map((o) =>
+          !o.houseId && o.isBroken
+            ? { ...o, isBroken: false, durability: 100 }
+            : o,
+        );
+        const remainingMesses = state.messes.filter((m) => m.kind !== 'puddle');
+        const post = createSocialPost({
+          id: nextId('post'),
+          authorName: state.sim.name,
+          authorColor: state.sim.appearance.topColor,
+          text: `Sunnyside Repair Tech came through and fixed ${brokenCount === 1 ? 'my broken appliance' : `all ${brokenCount} broken appliances`} in record time!`,
+          clock: state.clock,
+          tag: 'lifestyle',
+        });
+
+        set({
+          funds: state.funds - REPAIR_TECH_COST,
+          placedObjects: repairedObjects,
+          messes: remainingMesses,
+          socialFeed: [post, ...state.socialFeed].slice(0, 18),
+          pieMenu: null,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `Repair Tech fixed ${brokenCount} item${brokenCount > 1 ? 's' : ''} (-§${REPAIR_TECH_COST})`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      hireCleaningMaid: () => {
+        const state = get();
+        const dirtyCount = state.placedObjects.filter(
+          (o) => !o.houseId && (o.cleanliness ?? 100) < 95,
+        ).length;
+        if (dirtyCount === 0 && state.messes.length === 0) {
+          state.addFeedback('Your home is already spotless!', 'info');
+          return false;
+        }
+        if (state.funds < MAID_SERVICE_COST) {
+          state.addFeedback(`Need §${MAID_SERVICE_COST} for Cleaning Maid`, 'negative');
+          return false;
+        }
+
+        const cleanedObjects = state.placedObjects.map((o) =>
+          !o.houseId ? { ...o, cleanliness: 100 } : o,
+        );
+
+        set({
+          funds: state.funds - MAID_SERVICE_COST,
+          placedObjects: cleanedObjects,
+          messes: [],
+          pieMenu: null,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `Cleaning Maid made the house sparkle! (-§${MAID_SERVICE_COST})`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
+      buyUpgradeParts: () => {
+        const state = get();
+        if (state.funds < UPGRADE_PARTS_PACK_COST) {
+          state.addFeedback(`Need §${UPGRADE_PARTS_PACK_COST} for Upgrade Parts`, 'negative');
+          return false;
+        }
+        set({
+          funds: state.funds - UPGRADE_PARTS_PACK_COST,
+          handiness: {
+            ...state.handiness,
+            upgradeParts: state.handiness.upgradeParts + UPGRADE_PARTS_PACK_QTY,
+          },
+          pieMenu: null,
+          feedbacks: [
+            ...state.feedbacks.slice(-3),
+            {
+              id: nextId('fb'),
+              text: `+${UPGRADE_PARTS_PACK_QTY} Upgrade Parts delivered! (-§${UPGRADE_PARTS_PACK_COST})`,
+              tone: 'positive',
+              createdAt: Date.now(),
+            },
+          ],
+        });
+        return true;
+      },
+
       joinCareer: (careerId) => {
         const state = get();
         const careerDef = CAREERS_BY_ID[careerId];
@@ -1958,6 +2518,17 @@ export const useGameStore = create<GameStoreState>()(
               return false;
             }
           }
+        } else {
+          // Home lot maintenance & utility shutoff checks
+          if (obj.isBroken) {
+            state.addFeedback(`${item.name} is broken! Repair it or call a Repair Tech.`, 'negative');
+            return false;
+          }
+          const utilCheck = isObjectBlockedByUtility(obj, state.bills);
+          if (utilCheck.blocked) {
+            state.addFeedback(utilCheck.reason ?? 'Utility shut off — Pay Bills!', 'negative');
+            return false;
+          }
         }
 
         const cost = interaction.cost ?? 0;
@@ -1984,6 +2555,15 @@ export const useGameStore = create<GameStoreState>()(
           return false;
         }
 
+        const boosted = !obj.houseId
+          ? applyPerformanceUpgradeBonus(
+              interaction.durationSimMinutes,
+              interaction.needDeltas,
+              obj,
+              state.handiness.level,
+            )
+          : { durationSimMinutes: interaction.durationSimMinutes, needDeltas: interaction.needDeltas };
+
         const action: ActionQueueItem = {
           id: nextId('act'),
           kind: 'object',
@@ -1993,11 +2573,11 @@ export const useGameStore = create<GameStoreState>()(
           interactionId,
           targetTile: slot.tile,
           facingAngle: slot.facingAngle,
-          durationSimMinutes: interaction.durationSimMinutes,
+          durationSimMinutes: boosted.durationSimMinutes,
           elapsedSimMinutes: 0,
           cost,
           costPaid: false,
-          needDeltas: interaction.needDeltas,
+          needDeltas: boosted.needDeltas,
           animationPose: interaction.animationPose,
           emotionBoost: interaction.emotionBoost,
           opensWardrobe: interaction.opensWardrobe,
@@ -2085,6 +2665,7 @@ export const useGameStore = create<GameStoreState>()(
             allObjects: getAllWorldObjects(state.placedObjects),
             allWalls: getAllWorldWalls(state.walls),
             lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+            bills: state.bills,
           },
         );
         if (!choice) {
@@ -2275,38 +2856,74 @@ export const useGameStore = create<GameStoreState>()(
             };
           }
 
-          // Deduct interaction cost if not already paid
+          // Deduct interaction cost or upgrade parts if not already paid
           let nextFunds = state.funds;
+          let nextHandiness = state.handiness;
           const nextFeedbacks = [...state.feedbacks];
-          if (!front.costPaid && front.cost > 0) {
-            if (state.funds < front.cost) {
+          if (!front.costPaid && (front.cost > 0 || (front.partsCost ?? 0) > 0)) {
+            const partsNeeded = front.partsCost ?? 0;
+            if (partsNeeded > 0) {
+              if (state.handiness.upgradeParts < partsNeeded) {
+                nextFeedbacks.push({
+                  id: nextId('fb'),
+                  text: `Not enough Upgrade Parts (need ${partsNeeded})`,
+                  tone: 'negative',
+                  createdAt: Date.now(),
+                });
+                const nextQueue = preparePathForFrontAction(
+                  rest,
+                  state.sim,
+                  state.placedObjects,
+                  state.walls,
+                  state.unlockedHouseIds,
+                  state.npcs,
+                );
+                return {
+                  actionQueue: nextQueue,
+                  feedbacks: nextFeedbacks.slice(-4),
+                  sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
+                };
+              }
+              nextHandiness = {
+                ...state.handiness,
+                upgradeParts: state.handiness.upgradeParts - partsNeeded,
+              };
               nextFeedbacks.push({
                 id: nextId('fb'),
-                text: `Not enough Simoleons (§${front.cost})`,
+                text: `-${partsNeeded} Upgrade Part${partsNeeded > 1 ? 's' : ''}`,
+                tone: 'info',
+                createdAt: Date.now(),
+              });
+            } else if (front.cost > 0) {
+              if (state.funds < front.cost) {
+                nextFeedbacks.push({
+                  id: nextId('fb'),
+                  text: `Not enough Simoleons (§${front.cost})`,
+                  tone: 'negative',
+                  createdAt: Date.now(),
+                });
+                const nextQueue = preparePathForFrontAction(
+                  rest,
+                  state.sim,
+                  state.placedObjects,
+                  state.walls,
+                  state.unlockedHouseIds,
+                  state.npcs,
+                );
+                return {
+                  actionQueue: nextQueue,
+                  feedbacks: nextFeedbacks.slice(-4),
+                  sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
+                };
+              }
+              nextFunds -= front.cost;
+              nextFeedbacks.push({
+                id: nextId('fb'),
+                text: `-§${front.cost}`,
                 tone: 'negative',
                 createdAt: Date.now(),
               });
-              const nextQueue = preparePathForFrontAction(
-                rest,
-                state.sim,
-                state.placedObjects,
-                state.walls,
-                state.unlockedHouseIds,
-                state.npcs,
-              );
-              return {
-                actionQueue: nextQueue,
-                feedbacks: nextFeedbacks.slice(-4),
-                sim: { ...state.sim, pose: 'idle', activeObjectId: null, activeProp: null },
-              };
             }
-            nextFunds -= front.cost;
-            nextFeedbacks.push({
-              id: nextId('fb'),
-              text: `-§${front.cost}`,
-              tone: 'negative',
-              createdAt: Date.now(),
-            });
           }
 
           let facingAngle = front.facingAngle ?? state.sim.facingAngle;
@@ -2318,6 +2935,11 @@ export const useGameStore = create<GameStoreState>()(
             simBubble = {
               icon: 'knock',
               expiresAtSimMinute: state.clock.totalMinutes + front.durationSimMinutes + 4,
+            };
+          } else if (front.kind === 'repair' || front.kind === 'upgrade_object') {
+            simBubble = {
+              icon: 'wrench',
+              expiresAtSimMinute: state.clock.totalMinutes + front.durationSimMinutes + 2,
             };
           }
 
@@ -2415,6 +3037,7 @@ export const useGameStore = create<GameStoreState>()(
 
           return {
             funds: nextFunds,
+            handiness: nextHandiness,
             npcs: nextNpcs,
             feedbacks: nextFeedbacks.slice(-4),
             sim: {
@@ -2462,6 +3085,10 @@ export const useGameStore = create<GameStoreState>()(
           let nextUnlockedHouseIds = state.unlockedHouseIds;
           let nextNpcs = state.npcs;
           let nextDoorbellPrompt = state.doorbellPrompt;
+          let nextPlacedObjects = state.placedObjects;
+          let nextBills = state.bills;
+          let nextHandiness = state.handiness;
+          let nextMesses = state.messes;
           let nextCareer = state.career;
           let nextShiftPrompt = state.shiftPrompt;
           let nextActiveShift = state.activeShift;
@@ -2583,6 +3210,66 @@ export const useGameStore = create<GameStoreState>()(
               );
               nextDoorbellPrompt = null;
               pushFeedback('Visitors headed home for the night', 'info');
+            }
+          }
+
+          // Weekly Monday 8:00 AM Household Bill Issuance (classic Sims 4 cadence)
+          if (
+            getDayOfWeek(day) === 0 &&
+            day > 1 &&
+            hour >= 8 &&
+            nextBills.lastBilledDay < day
+          ) {
+            const breakdown = calculateWeeklyBill(nextPlacedObjects);
+            const updatedDue = nextBills.amountDue + breakdown.total;
+            const powerDeadline = nextBills.dueTotalMinutes ?? newTotal + 48 * 60;
+            const waterDeadline = nextBills.waterShutoffTotalMinutes ?? newTotal + 72 * 60;
+            nextBills = {
+              ...nextBills,
+              amountDue: updatedDue,
+              issuedOnDay: nextBills.issuedOnDay ?? day,
+              dueTotalMinutes: powerDeadline,
+              waterShutoffTotalMinutes: waterDeadline,
+              lastBilledDay: day,
+              lastBillBreakdown: breakdown,
+            };
+            nextPhoneHasBadge = true;
+            pushFeedback(`Weekly Bills Arrived: §${updatedDue} — Pay at Mailbox or Phone`, 'info');
+          }
+
+          // Utility Shutoff Escalation (48h -> Power Off, 72h -> Water Off)
+          if (nextBills.amountDue > 0) {
+            if (
+              !nextBills.powerShutoff &&
+              nextBills.dueTotalMinutes !== null &&
+              newTotal >= nextBills.dueTotalMinutes
+            ) {
+              nextBills = { ...nextBills, powerShutoff: true };
+              nextPhoneHasBadge = true;
+              pushFeedback(`Power Shut Off! Pay §${nextBills.amountDue} at Mailbox or Phone`, 'negative');
+              if (nextQueue.length > 0 && nextQueue[0].kind === 'object' && nextQueue[0].targetObjectId) {
+                const activeObj = nextPlacedObjects.find((o) => o.instanceId === nextQueue[0].targetObjectId);
+                if (activeObj && !activeObj.houseId && getMaintenanceSpecForObject(activeObj)?.requiresPower) {
+                  nextQueue = nextQueue.slice(1);
+                  nextSim = { ...nextSim, pose: 'idle', activeObjectId: null, activeProp: null };
+                }
+              }
+            }
+            if (
+              !nextBills.waterShutoff &&
+              nextBills.waterShutoffTotalMinutes !== null &&
+              newTotal >= nextBills.waterShutoffTotalMinutes
+            ) {
+              nextBills = { ...nextBills, waterShutoff: true };
+              nextPhoneHasBadge = true;
+              pushFeedback(`Water Shut Off! Pay §${nextBills.amountDue} bills immediately`, 'negative');
+              if (nextQueue.length > 0 && nextQueue[0].kind === 'object' && nextQueue[0].targetObjectId) {
+                const activeObj = nextPlacedObjects.find((o) => o.instanceId === nextQueue[0].targetObjectId);
+                if (activeObj && !activeObj.houseId && getMaintenanceSpecForObject(activeObj)?.requiresWater) {
+                  nextQueue = nextQueue.slice(1);
+                  nextSim = { ...nextSim, pose: 'idle', activeObjectId: null, activeProp: null };
+                }
+              }
             }
           }
 
@@ -2830,6 +3517,178 @@ export const useGameStore = create<GameStoreState>()(
                   }
                 }
 
+                // Home Object Wear, Grime, Breakage & Occasional Floor Messes
+                if (front.kind === 'object' && front.targetObjectId) {
+                  const usedHomeObj = nextPlacedObjects.find(
+                    (o) => o.instanceId === front.targetObjectId && !o.houseId,
+                  );
+                  if (usedHomeObj) {
+                    const { nextObj, justBroke, breakEffect } = applyObjectUseWear(usedHomeObj);
+                    nextPlacedObjects = nextPlacedObjects.map((o) =>
+                      o.instanceId === usedHomeObj.instanceId ? nextObj : o,
+                    );
+                    const usedItem = CATALOG_BY_ID[usedHomeObj.catalogId];
+                    if (justBroke && usedItem) {
+                      pushFeedback(`${usedItem.name} broke! Repair it or call Repair Tech.`, 'negative');
+                      if (breakEffect === 'leak' && nextMesses.length < MAX_HOUSEHOLD_MESSES) {
+                        const puddleTile = findNearbyMessSpawnTile(
+                          usedHomeObj,
+                          { x: nextSim.tileX, z: nextSim.tileZ },
+                          nextPlacedObjects,
+                          state.walls,
+                          nextMesses,
+                        );
+                        if (puddleTile) {
+                          nextMesses = [
+                            ...nextMesses,
+                            {
+                              id: nextId('mess'),
+                              kind: 'puddle',
+                              tileX: puddleTile.x,
+                              tileZ: puddleTile.z,
+                              createdAtSimMinute: newTotal,
+                            },
+                          ];
+                        }
+                      }
+                    } else if (
+                      front.interactionId &&
+                      DISH_SPAWNING_INTERACTION_IDS.has(front.interactionId) &&
+                      nextMesses.length < MAX_HOUSEHOLD_MESSES &&
+                      Math.floor(newTotal + nextMesses.length) % 3 === 0
+                    ) {
+                      const dishTile = findNearbyMessSpawnTile(
+                        usedHomeObj,
+                        { x: nextSim.tileX, z: nextSim.tileZ },
+                        nextPlacedObjects,
+                        state.walls,
+                        nextMesses,
+                      );
+                      if (dishTile) {
+                        nextMesses = [
+                          ...nextMesses,
+                          {
+                            id: nextId('mess'),
+                            kind: Math.floor(newTotal) % 2 === 0 ? 'dirty_dish' : 'trash_pile',
+                            tileX: dishTile.x,
+                            tileZ: dishTile.z,
+                            createdAtSimMinute: newTotal,
+                          },
+                        ];
+                      }
+                    }
+                  }
+                }
+
+                // Clean Home Object completion
+                if (front.kind === 'clean_object' && front.targetObjectId) {
+                  nextPlacedObjects = nextPlacedObjects.map((o) =>
+                    o.instanceId === front.targetObjectId ? { ...o, cleanliness: 100 } : o,
+                  );
+                  const { nextHandiness: updatedH, leveledUp } = awardHandinessXp(nextHandiness, 12);
+                  nextHandiness = updatedH;
+                  pushFeedback(
+                    leveledUp
+                      ? `Spotless! Handiness reached Lv ${nextHandiness.level}!`
+                      : 'Sparkling clean! (+12 Handiness XP)',
+                    'positive',
+                  );
+                }
+
+                // Repair Home Object completion -> fixes item, builds Handiness, salvages Upgrade Parts
+                if (front.kind === 'repair' && front.targetObjectId) {
+                  const targetObj = nextPlacedObjects.find((o) => o.instanceId === front.targetObjectId);
+                  const targetItem = targetObj ? CATALOG_BY_ID[targetObj.catalogId] : null;
+                  nextPlacedObjects = nextPlacedObjects.map((o) =>
+                    o.instanceId === front.targetObjectId
+                      ? { ...o, isBroken: false, durability: 100 }
+                      : o,
+                  );
+                  const partsGain = nextHandiness.level >= MAX_HANDINESS_LEVEL ? 2 : 1;
+                  const { nextHandiness: updatedH, leveledUp } = awardHandinessXp(
+                    nextHandiness,
+                    35,
+                    partsGain,
+                  );
+                  nextHandiness = updatedH;
+                  pushFeedback(
+                    leveledUp
+                      ? `Fixed ${targetItem?.name ?? 'item'}! Handiness Lv ${nextHandiness.level} (+${partsGain} Parts)`
+                      : `Repaired ${targetItem?.name ?? 'item'}! (+${partsGain} Upgrade Part${partsGain > 1 ? 's' : ''})`,
+                    'positive',
+                  );
+                  if (leveledUp) {
+                    const skillPost = createSocialPost({
+                      id: nextId('post'),
+                      authorName: nextSim.name,
+                      authorColor: nextSim.appearance.topColor,
+                      text: `Leveled up Handiness to Lv ${nextHandiness.level}! Ready to install new home upgrades!`,
+                      clock: nextClock,
+                      tag: 'lifestyle',
+                    });
+                    nextSocialFeed = [skillPost, ...nextSocialFeed].slice(0, 18);
+                  }
+                }
+
+                // Upgrade Home Object completion -> installs permanent upgrade + Handiness XP
+                if (front.kind === 'upgrade_object' && front.targetObjectId && front.upgradeId) {
+                  const upgradeDef = UPGRADE_BY_ID[front.upgradeId];
+                  nextPlacedObjects = nextPlacedObjects.map((o) => {
+                    if (o.instanceId !== front.targetObjectId) return o;
+                    const existing = o.upgrades ?? [];
+                    if (existing.includes(front.upgradeId!)) return o;
+                    return {
+                      ...o,
+                      cleanliness: front.upgradeId === 'self_cleaning' ? 100 : o.cleanliness,
+                      durability: front.upgradeId === 'unbreakable' ? 100 : o.durability,
+                      upgrades: [...existing, front.upgradeId!],
+                    };
+                  });
+                  const { nextHandiness: updatedH, leveledUp } = awardHandinessXp(nextHandiness, 45);
+                  nextHandiness = updatedH;
+                  pushFeedback(
+                    leveledUp
+                      ? `Installed ${upgradeDef?.shortLabel ?? 'Upgrade'}! Handiness Lv ${nextHandiness.level}!`
+                      : `Installed ${upgradeDef?.shortLabel ?? 'Upgrade'}!`,
+                    'positive',
+                  );
+                }
+
+                // Clean Floor Mess completion
+                if (front.kind === 'clean_mess' && front.targetMessId) {
+                  nextMesses = nextMesses.filter((m) => m.id !== front.targetMessId);
+                  const { nextHandiness: updatedH } = awardHandinessXp(nextHandiness, 8);
+                  nextHandiness = updatedH;
+                  pushFeedback('Mess cleaned up!', 'positive');
+                }
+
+                // Pay Bills at Mailbox completion
+                if (front.kind === 'pay_bills' && nextBills.amountDue > 0) {
+                  if (nextFunds >= nextBills.amountDue) {
+                    const paid = nextBills.amountDue;
+                    const wasShutoff = nextBills.powerShutoff || nextBills.waterShutoff;
+                    nextFunds -= paid;
+                    nextBills = {
+                      ...nextBills,
+                      amountDue: 0,
+                      issuedOnDay: null,
+                      dueTotalMinutes: null,
+                      waterShutoffTotalMinutes: null,
+                      powerShutoff: false,
+                      waterShutoff: false,
+                      totalBillsPaid: nextBills.totalBillsPaid + paid,
+                    };
+                    pushFeedback(
+                      wasShutoff
+                        ? `Paid §${paid} — Power & Water Restored!`
+                        : `Household Bills Paid (-§${paid})`,
+                      'positive',
+                    );
+                  } else {
+                    pushFeedback(`Need §${nextBills.amountDue} to pay bills`, 'negative');
+                  }
+                }
+
                 // Career Daily Prep Task & Work From Home Task matching
                 if (nextCareer && front.interactionId) {
                   const levelDef = getCareerLevel(nextCareer.careerId, nextCareer.level);
@@ -2914,7 +3773,7 @@ export const useGameStore = create<GameStoreState>()(
                 const preparedNext = preparePathForFrontAction(
                   rest,
                   nextSim,
-                  state.placedObjects,
+                  nextPlacedObjects,
                   state.walls,
                   nextUnlockedHouseIds,
                   nextNpcs,
@@ -3056,11 +3915,19 @@ export const useGameStore = create<GameStoreState>()(
             );
           }
 
-          const nextEmotion = computeEmotion(nextNeeds, nextSim.emotionBoost, newTotal);
+          const envPenalty = getEnvironmentMessPenalty(nextPlacedObjects, nextMesses, {
+            x: nextSim.tileX,
+            z: nextSim.tileZ,
+          });
+          const nextEmotion = computeEmotion(nextNeeds, nextSim.emotionBoost, newTotal, envPenalty);
 
           return {
             clock: nextClock,
             funds: nextFunds,
+            placedObjects: nextPlacedObjects,
+            bills: nextBills,
+            handiness: nextHandiness,
+            messes: nextMesses,
             speed: nextSpeed,
             lastLiveSpeed: nextLastLiveSpeed,
             feedbacks: nextFeedbacks.slice(-4),
@@ -3111,6 +3978,7 @@ export const useGameStore = create<GameStoreState>()(
             allObjects: getAllWorldObjects(state.placedObjects),
             allWalls: getAllWorldWalls(state.walls),
             lockedDoorWallIds: getLockedDoorWallIdsForMaya(state.unlockedHouseIds),
+            bills: state.bills,
           },
         );
         if (!choice) {
@@ -3324,6 +4192,7 @@ export const useGameStore = create<GameStoreState>()(
           set({
             funds: state.funds - item.price,
             placedObjects: [...state.placedObjects, newObj],
+            messes: state.messes.filter((m) => !occupiedSet.has(`${m.tileX},${m.tileZ}`)),
             npcs: nextNpcs,
             buildSelection: null,
             feedbacks: [
@@ -3388,6 +4257,7 @@ export const useGameStore = create<GameStoreState>()(
 
         set({
           placedObjects: movedObjects,
+          messes: state.messes.filter((m) => !occupiedSet.has(`${m.tileX},${m.tileZ}`)),
           sim: nextSim,
           npcs: nextNpcs,
           actionQueue: nextQueue,
@@ -3411,8 +4281,9 @@ export const useGameStore = create<GameStoreState>()(
         if (!sel || sel.mode !== 'move_existing' || !sel.movingInstanceId) return false;
         const item = CATALOG_BY_ID[sel.catalogId];
         if (!item) return false;
-
-        const refund = Math.round(item.price * 0.8);
+        const soldObj = state.placedObjects.find((o) => o.instanceId === sel.movingInstanceId);
+        const upgradeBonus = (soldObj?.upgrades?.length ?? 0) > 0 ? 1.1 : 1;
+        const refund = Math.round(item.price * 0.8 * upgradeBonus);
         const remainingObjects = state.placedObjects.filter(
           (o) => o.instanceId !== sel.movingInstanceId,
         );
@@ -3492,6 +4363,9 @@ export const useGameStore = create<GameStoreState>()(
           activeShift: null,
           activeChanceCard: null,
           promotionSummary: null,
+          bills: createInitialBillsState(),
+          handiness: createInitialHandiness(),
+          messes: [],
           speed: 1,
           lastLiveSpeed: 1,
           freeWill: true,
@@ -3539,6 +4413,9 @@ export const useGameStore = create<GameStoreState>()(
         socialFeed: state.socialFeed,
         unlockedHouseIds: state.unlockedHouseIds,
         career: state.career,
+        bills: state.bills,
+        handiness: state.handiness,
+        messes: state.messes,
         sim: {
           ...state.sim,
           pose: 'idle' as const,
@@ -3556,6 +4433,15 @@ export const useGameStore = create<GameStoreState>()(
         }
         if (!state.phoneCaseId) {
           state.phoneCaseId = 'coastal_mint';
+        }
+        if (!state.bills) {
+          state.bills = createInitialBillsState();
+        }
+        if (!state.handiness) {
+          state.handiness = createInitialHandiness();
+        }
+        if (!Array.isArray(state.messes)) {
+          state.messes = [];
         }
         const defaultContacts = createInitialContacts();
         if (!Array.isArray(state.contacts) || state.contacts.length === 0) {

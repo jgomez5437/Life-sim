@@ -2,6 +2,7 @@ import { CATALOG_BY_ID, SELF_INTERACTIONS } from '../data/catalog';
 import type {
   AnimationPose,
   EmotionType,
+  HouseholdBillsState,
   NeedKey,
   PlacedObject,
   SimNeeds,
@@ -9,6 +10,7 @@ import type {
   WallSegment,
 } from '../types/game';
 import { getBestInteractionSlot } from './grid';
+import { isObjectBlockedByUtility } from './household';
 import { findPath } from './pathfinding';
 
 export const NEED_KEYS: NeedKey[] = ['hunger', 'energy', 'bladder', 'hygiene', 'fun', 'social'];
@@ -84,6 +86,7 @@ export function computeEmotion(
   needs: SimNeeds,
   boost: { type: EmotionType; expiresAtSimMinute: number } | null,
   currentTotalMinutes: number,
+  environmentPenalty = 0,
 ): EmotionType {
   if (needs.energy < 20) return 'exhausted';
   if (needs.hunger < 22 || needs.bladder < 20 || needs.hygiene < 20) return 'uncomfortable';
@@ -92,6 +95,8 @@ export function computeEmotion(
   if (boost && currentTotalMinutes < boost.expiresAtSimMinute) {
     return boost.type;
   }
+
+  if (environmentPenalty >= 2) return 'uncomfortable';
 
   const avg = getAverageNeeds(needs);
   if (avg >= 72) return 'happy';
@@ -148,6 +153,7 @@ export function pickAutonomousAction(
     allObjects: PlacedObject[];
     allWalls: WallSegment[];
     lockedDoorWallIds?: Set<string>;
+    bills?: HouseholdBillsState;
   },
 ): ScoredAutonomyCandidate | null {
   if (sim.awayAtWork) return null;
@@ -156,6 +162,7 @@ export function pickAutonomousAction(
   const navObjects = worldContext?.allObjects ?? placedObjects;
   const navWalls = worldContext?.allWalls ?? walls;
   const lockedDoors = worldContext?.lockedDoorWallIds;
+  const bills = worldContext?.bills;
 
   const scoreNeedDeltas = (
     deltas: Partial<Record<NeedKey, number>>,
@@ -182,6 +189,8 @@ export function pickAutonomousAction(
 
   // Evaluate placed furniture
   for (const obj of placedObjects) {
+    if (obj.isBroken) continue;
+    if (bills && isObjectBlockedByUtility(obj, bills).blocked) continue;
     const item = CATALOG_BY_ID[obj.catalogId];
     if (!item || item.interactions.length === 0) continue;
 
